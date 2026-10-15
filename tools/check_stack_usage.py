@@ -28,7 +28,7 @@ PROJECT = Path(__file__).resolve().parent.parent
 COMPONENT_DIR = PROJECT / "components" / "easytier-esp"
 BUILD_DIR = PROJECT / "build"
 ELF = BUILD_DIR / "easytier-esp.elf"
-INSTANCE_CPP = COMPONENT_DIR / "src" / "instance.cpp"
+INSTANCE_CPP = COMPONENT_DIR / "src" / "inst.cpp"
 
 # 任务入口符号 → (C++ 实现函数, 栈大小常量名)。
 #
