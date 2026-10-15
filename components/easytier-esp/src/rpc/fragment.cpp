@@ -256,15 +256,4 @@ void RpcReassembler::reset() noexcept {
     }
 }
 
-/** @brief 统计占用中的槽位。 */
-size_t RpcReassembler::active_slots() const noexcept {
-    size_t count = 0;
-    for (const Slot& slot : slots_) {
-        if (slot.used) {
-            ++count;
-        }
-    }
-    return count;
-}
-
 }  // namespace et

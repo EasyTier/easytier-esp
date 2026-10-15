@@ -325,33 +325,6 @@ bool parse_uuid_text(std::string_view text, std::array<uint8_t, 16>& out) noexce
     return high < 0 && out_index == out.size();
 }
 
-/** @brief 数值 IPv4 转点分文本（不分配，写入调用方缓冲区）。 */
-std::string_view ipv4_to_text(uint32_t value, std::array<char, 16>& buf) noexcept {
-    size_t pos = 0;
-    for (int shift = 24; shift >= 0; shift -= 8) {
-        const uint32_t octet = (value >> shift) & 0xFF;
-        char digits[3];
-        size_t n = 0;
-        uint32_t v = octet;
-        do {
-            digits[n++] = static_cast<char>('0' + (v % 10));
-            v /= 10;
-        } while (v != 0);
-        while (n > 0) {
-            if (pos + 1 < buf.size()) {
-                buf[pos++] = digits[--n];
-            } else {
-                --n;
-            }
-        }
-        if (shift != 0 && pos + 1 < buf.size()) {
-            buf[pos++] = '.';
-        }
-    }
-    buf[pos] = '\0';
-    return {buf.data(), pos};
-}
-
 /**
  * @brief 按上游规则规范化主机名。
  * @details 剔除控制字符、最多保留 32 个 Unicode 码点；遇到非法 UTF-8 即停止（与上游

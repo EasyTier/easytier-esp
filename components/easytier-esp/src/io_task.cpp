@@ -8,11 +8,11 @@
  * - 用一次 select 同时等待所有槽的可读/可写，读取并切分完整帧后按类型投入控制面或
  *   数据面队列；
  * - 帧的选路规则（见 `frame_sendable`）：
- *   * 控制面自己发的帧带 `slot`：只允许该槽、且代际必须匹配；
  *   * 带 `to_peer` 的帧（数据面/转发的 RPC）：只允许 peer id 匹配的槽，不校验代际
  *     （同一网络密钥下，重连后的密文依然有效，按 peer 选路更稳）；
+ *   * 带代际的帧（控制面自己发的握手/Ping/RPC/同步）：只有该代际所属的槽；
  *   * 两者都未指定：任一已连接槽。
- * - 连接断开/物理网络断开时上报事件（带槽位与对端 id）、递增该槽代际并关闭 socket；
+ * - 连接断开/物理网络断开时上报事件（带槽位与代际）、递增该槽代际并关闭 socket；
  * - 绝不做解析、加解密或路由判断。
  */
 #include "context.hpp"
@@ -56,14 +56,33 @@ struct FrameSink {
     uint32_t generation = 0;  ///< 帧所属的连接代际
 };
 
-/** @brief 投递连接事件给控制面。 */
-void post_event(Context& ctx, IoEvent kind, uint8_t slot, uint32_t generation,
-                uint32_t peer_id) noexcept {
+/** @brief 把槽的入口下标轮换到下一条（入口数为 0 时保持不变）。 */
+void advance_peer_index(const Context& ctx, size_t& index) noexcept {
+    const size_t count = ctx.config.peers.size();
+    index = count > 0 ? (index + 1) % count : 0;
+}
+
+/**
+ * @brief 安排一次重试并指数退避（封顶 @ref kMaxBackoffMs ）。
+ * @return 本次实际等待的毫秒数，与 @p st.retry_at_ms 一致，便于日志打印准确值
+ */
+uint32_t schedule_retry(SlotState& st) noexcept {
+    st.retry_at_ms = now_ms() + st.backoff_ms;
+    const uint32_t delay = st.backoff_ms;
+    st.backoff_ms = (st.backoff_ms >= kMaxBackoffMs) ? kMaxBackoffMs : st.backoff_ms * 2;
+    return delay;
+}
+
+/**
+ * @brief 投递连接事件给控制面。
+ * @note 事件只带槽位与代际：对端 peer id 由控制面自己从 `ctx.slots[slot].peer_id`
+ *       读取，避免同一条信息有两个真值来源。
+ */
+void post_event(Context& ctx, IoEvent kind, uint8_t slot, uint32_t generation) noexcept {
     SmallMessage msg{};
     msg.kind = static_cast<uint8_t>(kind);
     msg.slot = slot;
     msg.generation = generation;
-    msg.peer_id = peer_id;
     if (xQueueSend(ctx.q_evt, &msg, 0) != pdTRUE) {
         // 事件队列满：控制面下一轮会发现连接状态变化，这里只记丢弃。
         ctx.dropped.fetch_add(1);
@@ -140,24 +159,18 @@ bool frame_sendable(const FrameMessage& tx, uint32_t slot_generation,
 void drop_slot(Context& ctx, size_t slot, SlotState& st) noexcept {
     ConnSlot& conn_slot = ctx.slots[slot];
     const uint32_t generation = conn_slot.generation.load();
-    const uint32_t peer_id = conn_slot.peer_id.load();
     if (conn_slot.conn != nullptr) {
         conn_slot.conn->close();
     }
-    conn_slot.alive.store(false);
     conn_slot.peer_id.store(0);
     st.connecting = false;
     if (st.session_open) {
-        post_event(ctx, IoEvent::Disconnected, static_cast<uint8_t>(slot), generation, peer_id);
+        post_event(ctx, IoEvent::Disconnected, static_cast<uint8_t>(slot), generation);
         st.session_open = false;
     }
     // 轮换入口并指数退避，避免对同一入口高频重试。
-    const size_t peer_count = ctx.config.peers.size();
-    if (peer_count > 0) {
-        st.peer_index = (st.peer_index + 1) % peer_count;
-    }
-    st.retry_at_ms = now_ms() + st.backoff_ms;
-    st.backoff_ms = (st.backoff_ms >= kMaxBackoffMs) ? kMaxBackoffMs : st.backoff_ms * 2;
+    advance_peer_index(ctx, st.peer_index);
+    (void)schedule_retry(st);
 }
 
 /**
@@ -287,9 +300,8 @@ void io_task(void* arg) noexcept {
             if (!select_entry(ctx, states, i, st.peer_index)) continue;
             const PeerEndpoint& peer = ctx.config.peers[st.peer_index];
             if (!conn_slot.conn->begin_connect(peer.host.view(), peer.port)) {
-                st.peer_index = (st.peer_index + 1) % peer_count;
-                st.retry_at_ms = now_ms() + st.backoff_ms;
-                st.backoff_ms = (st.backoff_ms >= kMaxBackoffMs) ? kMaxBackoffMs : st.backoff_ms * 2;
+                advance_peer_index(ctx, st.peer_index);
+                (void)schedule_retry(st);
                 continue;
             }
             st.connecting = true;
@@ -305,11 +317,10 @@ void io_task(void* arg) noexcept {
             const ConnectState st_connect = conn_slot.conn->poll_connect();
             if (st_connect == ConnectState::Failed) {
                 st.connecting = false;
-                st.peer_index = peer_count > 0 ? (st.peer_index + 1) % peer_count : 0;
-                st.retry_at_ms = now_ms() + st.backoff_ms;
-                st.backoff_ms = (st.backoff_ms >= kMaxBackoffMs) ? kMaxBackoffMs : st.backoff_ms * 2;
+                advance_peer_index(ctx, st.peer_index);
+                const uint32_t retry_ms = schedule_retry(st);
                 ET_LOGW(kTag, "slot %u connect failed, retry in %u ms", static_cast<unsigned>(i),
-                        static_cast<unsigned>(st.backoff_ms));
+                        static_cast<unsigned>(retry_ms));
                 continue;
             }
             if (st_connect != ConnectState::Connected) {
@@ -321,9 +332,8 @@ void io_task(void* arg) noexcept {
             const uint32_t generation = ctx.generation.fetch_add(1) + 1;
             conn_slot.generation.store(generation);
             conn_slot.peer_id.store(0);  // 握手成功后由控制面写入
-            conn_slot.alive.store(true);
             ctx.state.store(State::Connecting);
-            post_event(ctx, IoEvent::Connected, static_cast<uint8_t>(i), generation, 0);
+            post_event(ctx, IoEvent::Connected, static_cast<uint8_t>(i), generation);
         }
 
         // 5) 把待发帧搬进各槽。
@@ -379,7 +389,6 @@ void io_task(void* arg) noexcept {
             }
             const int fd = conn_slot.conn->fd();
             FrameSink sink{&ctx, static_cast<uint8_t>(i), conn_slot.generation.load()};
-            const uint32_t generation = conn_slot.generation.load();
 
             if (ready > 0 && FD_ISSET(fd, &rfds)) {
                 size_t frames = 0;
@@ -398,7 +407,6 @@ void io_task(void* arg) noexcept {
                     continue;
                 }
             }
-            (void)generation;
 
             // 接收缓冲里可能还有完整帧（上一轮帧预算用尽），立刻切分。
             while (conn_slot.conn->connected() &&
@@ -423,7 +431,7 @@ void io_task(void* arg) noexcept {
         }
         if (states[i].session_open) {
             post_event(ctx, IoEvent::Disconnected, static_cast<uint8_t>(i),
-                       conn_slot.generation.load(), conn_slot.peer_id.load());
+                       conn_slot.generation.load());
         }
     }
     (void)xSemaphoreGive(ctx.task_exit);

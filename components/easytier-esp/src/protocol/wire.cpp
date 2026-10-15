@@ -7,7 +7,6 @@
  */
 #include "protocol/wire.hpp"
 
-#include <cstring>
 
 namespace et {
 namespace {
@@ -16,12 +15,6 @@ namespace {
 #pragma pack(push, 1)
 struct TcpTunnelHeaderLayout {
     uint32_t len;
-};
-struct UdpTunnelHeaderLayout {
-    uint32_t conn_id;
-    uint8_t msg_type;
-    uint8_t padding;
-    uint16_t len;
 };
 struct PeerManagerHeaderLayout {
     uint32_t from_peer_id;
@@ -35,7 +28,6 @@ struct PeerManagerHeaderLayout {
 #pragma pack(pop)
 
 static_assert(sizeof(TcpTunnelHeaderLayout) == kTcpTunnelHeaderSize, "TCP 帧头必须为 4 字节");
-static_assert(sizeof(UdpTunnelHeaderLayout) == kUdpTunnelHeaderSize, "UDP 头必须为 8 字节");
 static_assert(sizeof(PeerManagerHeaderLayout) == kPeerManagerHeaderSize, "PM 头必须为 16 字节");
 static_assert(offsetof(PeerManagerHeaderLayout, from_peer_id) == 0, "PM 字段顺序变化");
 static_assert(offsetof(PeerManagerHeaderLayout, to_peer_id) == 4, "PM 字段顺序变化");
@@ -93,29 +85,6 @@ void encode_tcp_tunnel_header(MutBytes out, uint32_t body_len) noexcept {
         return;
     }
     put_u32_le(out.data(), body_len);
-}
-
-/** @brief 编码 8 字节 UDP mux 头。 */
-void encode_udp_tunnel_header(MutBytes out, const UdpTunnelHeader& hdr) noexcept {
-    if (out.size() < kUdpTunnelHeaderSize) {
-        return;
-    }
-    put_u32_le(out.data(), hdr.conn_id);
-    out[4] = hdr.msg_type;
-    out[5] = hdr.padding;
-    put_u16_le(out.data() + 6, hdr.len);
-}
-
-/** @brief 解码 8 字节 UDP mux 头。 */
-bool decode_udp_tunnel_header(Bytes in, UdpTunnelHeader& out) noexcept {
-    if (in.size() < kUdpTunnelHeaderSize) {
-        return false;
-    }
-    out.conn_id = get_u32_le(in.data());
-    out.msg_type = in[4];
-    out.padding = in[5];
-    out.len = get_u16_le(in.data() + 6);
-    return true;
 }
 
 }  // namespace et

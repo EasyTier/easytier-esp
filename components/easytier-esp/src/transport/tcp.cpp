@@ -242,14 +242,4 @@ bool TcpConn::flush(size_t budget_bytes) noexcept {
     return true;
 }
 
-/** @brief 待发送字节数（含各帧的长度前缀）。 */
-size_t TcpConn::pending_tx_bytes() const noexcept {
-    size_t total = 0;
-    for (size_t i = 0; i < tx_count_; ++i) {
-        const TxSlot& slot = tx_[(tx_head_ + i) % kTxSlots];
-        total += slot.len - slot.off;
-    }
-    return total;
-}
-
 }  // namespace et

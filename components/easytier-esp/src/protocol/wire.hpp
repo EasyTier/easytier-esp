@@ -23,14 +23,16 @@ namespace et {
 
 /** @brief TCP 帧头长度（u32 小端长度前缀）。 */
 inline constexpr size_t kTcpTunnelHeaderSize = 4;
-/** @brief UDP mux 头长度。 */
+/**
+ * @brief 上游 UDP mux 头长度。
+ * @note 本组件只实现 TCP 传输；这个常量仅用于对齐上游计算 RPC 分片预算的口径
+ *       （分片按 UDP payload 预算切分，中继转 UDP 时也合法）。
+ */
 inline constexpr size_t kUdpTunnelHeaderSize = 8;
 /** @brief PeerManagerHeader 长度。 */
 inline constexpr size_t kPeerManagerHeaderSize = 16;
 /** @brief 上游 FramedReader 允许的最大 TCP body 长度（PM 头 + payload + AEAD 尾）。 */
 inline constexpr size_t kMaxTcpBodyLen = 2000;
-/** @brief 最大 TCP 帧长度（含 4 字节长度前缀）。 */
-inline constexpr size_t kMaxTcpFrameLen = kTcpTunnelHeaderSize + kMaxTcpBodyLen;
 /** @brief 无压缩 AES profile 下最大明文 payload（2000 - 16 - 28）。 */
 inline constexpr size_t kMaxPlainPayload = kMaxTcpBodyLen - kPeerManagerHeaderSize - 28;
 /** @brief 转发计数上限，超过即丢弃，用于防环兜底。 */
@@ -65,18 +67,6 @@ enum class PacketType : uint8_t {
     DataWithQuicSrcModified = 19,  ///< 上游内部使用
     RelayHandshake = 20,           ///< 中继凭证握手（不支持）
     RelayHandshakeAck = 21,        ///< 中继凭证握手应答（不支持）
-};
-
-/** @brief UDP mux 的 msg_type 取值。 */
-enum class UdpMsgType : uint8_t {
-    Invalid = 0,      ///< 非法
-    Syn = 1,          ///< 建链请求
-    Sack = 2,         ///< 建链应答
-    Data = 3,         ///< 数据
-    Fin = 4,          ///< 枚举占位；上游接收分类未实现该值，不要依赖它关闭会话
-    HolePunch = 5,    ///< 打洞探测
-    V4HolePunch = 6,  ///< IPv4 打洞地址通知
-    V6HolePunch = 7,  ///< IPv6 打洞地址通知
 };
 
 /** @brief PeerManagerHeader 的 flags 位定义。 */
@@ -133,18 +123,5 @@ void encode_peer_manager_header(MutBytes out, const PeerManagerHeader& hdr) noex
 
 /** @brief 写入 TCP 帧的 u32 小端长度前缀。 */
 void encode_tcp_tunnel_header(MutBytes out, uint32_t body_len) noexcept;
-
-/** @brief 8 字节 UDP mux 头。 */
-struct UdpTunnelHeader {
-    uint32_t conn_id = 0;  ///< 会话 id
-    uint8_t msg_type = 0;  ///< @ref UdpMsgType
-    uint8_t padding = 0;   ///< 填充，恒为 0
-    uint16_t len = 0;      ///< 本头之后的字节数
-};
-
-/** @brief 编码 UDP mux 头。 */
-void encode_udp_tunnel_header(MutBytes out, const UdpTunnelHeader& hdr) noexcept;
-/** @brief 解码 UDP mux 头，输入不足 8 字节时返回 false。 */
-[[nodiscard]] bool decode_udp_tunnel_header(Bytes in, UdpTunnelHeader& out) noexcept;
 
 }  // namespace et

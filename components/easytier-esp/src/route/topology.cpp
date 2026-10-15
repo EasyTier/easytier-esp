@@ -214,31 +214,4 @@ void Topology::expire(uint32_t now_ms) noexcept {
     }
 }
 
-/** @brief 参与建图的节点数。 */
-size_t Topology::graph_peer_count() const noexcept {
-    size_t count = 0;
-    for (size_t i = 0; i < peer_count_; ++i) {
-        if (peers_[i].in_graph) {
-            ++count;
-        }
-    }
-    return count;
-}
-
-/** @brief 查询有向邻接 src → dst。 */
-bool Topology::edge_exists(uint32_t src, uint32_t dst) const noexcept {
-    for (size_t i = 0; i < row_count_; ++i) {
-        if (rows_[i].peer_id != src || !rows_[i].valid) {
-            continue;
-        }
-        for (size_t c = 0; c < rows_[i].connected_count; ++c) {
-            if (rows_[i].connected[c] == dst) {
-                return true;
-            }
-        }
-        return false;
-    }
-    return false;
-}
-
 }  // namespace et

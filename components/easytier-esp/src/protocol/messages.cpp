@@ -7,7 +7,6 @@
  */
 #include "protocol/messages.hpp"
 
-#include <cstring>
 
 namespace et {
 namespace {
@@ -331,13 +330,6 @@ bool encode_rpc_response_checked(Bytes response, Bytes error_raw, uint64_t runti
     w.put_uint64(3, runtime_us);
     out_len = w.ok() ? w.size() : 0;
     return w.ok();
-}
-
-/** @brief 编码 RpcResponse（error_raw 原样透传）。 */
-size_t encode_rpc_response(Bytes response, Bytes error_raw, uint64_t runtime_us,
-                           MutBytes out) noexcept {
-    size_t out_len = 0;
-    return encode_rpc_response_checked(response, error_raw, runtime_us, out, out_len) ? out_len : 0;
 }
 
 /**

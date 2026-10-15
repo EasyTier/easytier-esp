@@ -56,8 +56,6 @@ public:
     /** @brief 移除网卡并释放状态。 */
     void destroy() noexcept;
 
-    /** @brief 是否已创建。 */
-    [[nodiscard]] bool created() const noexcept { return created_; }
 
     /** @brief 创建参数中的 MTU，供 TCPIP 初始化回调读取。 */
     [[nodiscard]] uint16_t configured_mtu() const noexcept { return mtu_; }
@@ -87,15 +85,6 @@ private:
     bool created_ = false;        ///< 是否已注册
 };
 
-/**
- * @brief 检查虚拟网段是否与某个物理网段重叠。
- * @param virt_ip 虚拟地址（数值表示）
- * @param virt_prefix 虚拟前缀
- * @param phys_ip 物理地址（数值表示）
- * @param phys_prefix 物理前缀
- */
-[[nodiscard]] bool virtual_netif_overlaps(uint32_t virt_ip, uint8_t virt_prefix,
-                                          uint32_t phys_ip, uint8_t phys_prefix) noexcept;
 #endif
 
 }  // namespace et

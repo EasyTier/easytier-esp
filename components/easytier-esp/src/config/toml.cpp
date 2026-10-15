@@ -199,8 +199,8 @@ esp_err_t map_network_identity(const toml_datum_t& top, Config& out) noexcept {
         const std::string_view name = table_key(table, i);
         const toml_datum_t datum = table.u.tab.value[i];
         const std::string_view value = datum_sv(datum);
-        char path[192];
-        const auto full = join_key(path, sizeof(path), "network_identity.", name);
+        std::array<char, kMaxDiagnosticKey> path{};
+        const auto full = join_key(path.data(), path.size(), "network_identity.", name);
         bool adopted = false;
         if (datum.type == TOML_STRING && value.find('\0') == std::string_view::npos) {
             if (name == "network_name" && !value.empty()) {
@@ -249,9 +249,9 @@ esp_err_t map_peers(const toml_datum_t& top, Config& out) noexcept {
         for (int32_t k = 0; k < entry.u.tab.size; ++k) {
             const auto name = table_key(entry, k);
             if (name == "uri") continue;
-            char path[192];
+            std::array<char, kMaxDiagnosticKey> path{};
             add_diag(out, ConfigIssue::IgnoredParameter, entry.u.tab.value[k],
-                     join_key(path, sizeof(path), "peer.", name));
+                     join_key(path.data(), path.size(), "peer.", name));
         }
         const toml_datum_t uri = et_toml_get(entry, "uri");
         std::string_view host{};
@@ -303,9 +303,9 @@ void map_flags(const toml_datum_t& top, Config& out) noexcept {
             datum_sv(datum) == "aes-gcm") continue;
         if (name == "data_compress_algo" && datum.type == TOML_STRING &&
             datum_sv(datum) == "None") continue;
-        char path[192];
+        std::array<char, kMaxDiagnosticKey> path{};
         add_diag(out, ConfigIssue::IgnoredParameter, datum,
-                 join_key(path, sizeof(path), "flags.", name));
+                 join_key(path.data(), path.size(), "flags.", name));
     }
 }
 
@@ -580,7 +580,7 @@ esp_err_t parse_toml_into(Config& out, std::string_view text) noexcept {
     (void)budget_used;
     ET_LOGD(kTag, "TOML parsed, heap %u bytes", static_cast<unsigned>(budget_used));
     // 与上游空配置/空 peer 列表语义一致：解析成功不代表网络已具备可用路由。
-    // 编程式 Config 入口仍保留严格校验；TOML 入口按逐字段提取契约返回成功。
+    // TOML 入口按逐字段提取契约返回成功；结构完整性由 et::Inst::init 校验。
     return ESP_OK;
 }
 

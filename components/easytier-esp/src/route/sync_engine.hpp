@@ -13,7 +13,6 @@
 #pragma once
 
 #include <array>
-#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <span>
@@ -100,17 +99,9 @@ public:
      */
     void set_direct_peers(const uint32_t* peers, size_t count, uint32_t now) noexcept;
 
-    /** @brief 当前直连对端数量。 */
-    [[nodiscard]] size_t direct_peer_count() const noexcept { return direct_peer_count_; }
 
     /** @brief 是否至少有一个已握手对端。 */
     [[nodiscard]] bool peer_up() const noexcept { return active_peer_count_ != 0; }
-    /** @brief 已握手直连对端数量。 */
-    [[nodiscard]] size_t active_peer_count() const noexcept { return active_peer_count_; }
-    /** @brief 第 i 个已握手直连对端（i < active_peer_count()）。 */
-    [[nodiscard]] uint32_t active_peer(size_t i) const noexcept {
-        return active_peers_[i].peer_id;
-    }
     /**
      * @brief 查询某个直连对端的会话 id（0 表示未知）。
      * @details 会话 id 是**每个连接各自一份**的（上游 `my_session_id` 属于 PeerRoute
@@ -118,10 +109,6 @@ public:
      *          第一个对端看到"我们的会话 id 变了"而清空已保存的信息。
      */
     [[nodiscard]] uint64_t session_id_of(uint32_t peer_id) const noexcept;
-    /** @brief 已握手对端集合中是否包含该 peer id。 */
-    [[nodiscard]] bool is_active_peer(uint32_t peer_id) const noexcept;
-    /** @brief 本节点 RoutePeerInfo 的当前版本。 */
-    [[nodiscard]] uint32_t self_info_version() const noexcept { return self_info_version_; }
 
     /**
      * @brief 按拓扑中通告的地址做 dhcp 自分配（未启用 dhcp 时直接返回 false）。
@@ -166,17 +153,8 @@ public:
 
     /** @brief 当前路由快照。 */
     [[nodiscard]] const RouteSnapshot& snapshot() const noexcept { return table_.snapshot(); }
-    /** @brief 当前可达路由数。 */
-    [[nodiscard]] size_t reachable_count() const noexcept {
-        return table_.snapshot().reachable_count();
-    }
     /** @brief 拓扑（只读，测试与诊断用）。 */
     [[nodiscard]] const Topology& topology() const noexcept { return topology_; }
-
-    /** @brief 本节点 RoutePeerInfo 的编码结果（只读）。 */
-    [[nodiscard]] Bytes self_info() const noexcept {
-        return {self_peer_info_.data(), self_peer_info_len_};
-    }
 
 private:
     /** @brief 构造/刷新本节点 RoutePeerInfo 的编码。 */
@@ -202,12 +180,6 @@ private:
         uint32_t static_ipv4 = 0;                          ///< 静态虚拟 IPv4
         uint8_t static_prefix = 24;                        ///< 静态前缀长度
         bool dhcp = false;                                 ///< 是否启用虚拟地址自分配
-        bool dhcp_has_subnet = false;                      ///< 是否显式配置了 dhcp 子网
-        uint32_t dhcp_subnet = kDefaultDhcpSubnet;         ///< dhcp 子网网络号
-        uint8_t dhcp_prefix = kDefaultDhcpPrefix;          ///< dhcp 子网前缀长度
-
-        /** @brief 主机名视图。 */
-        [[nodiscard]] std::string_view hostname_view() const noexcept { return hostname.view(); }
     };
 
     EngineConfig config_{};              ///< 配置子集（只用到其中少数字段）
@@ -227,7 +199,6 @@ private:
     uint32_t my_ipv4_ = 0;               ///< 当前虚拟地址
     uint8_t my_prefix_ = 24;             ///< 当前前缀
     bool has_routes_ = false;            ///< 是否收到过任何拓扑
-    uint32_t random_seed_ = 0;           ///< 自分配用的随机种子（由调用方注入）
 
     std::array<uint32_t, kMaxRoutePeers> direct_peers_{};  ///< 直连对端集合
     size_t direct_peer_count_ = 0;                         ///< 直连数量

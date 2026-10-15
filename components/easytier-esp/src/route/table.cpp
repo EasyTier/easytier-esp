@@ -149,12 +149,6 @@ void RouteTable::recompute(const Topology& topo, uint32_t self_peer_id) noexcept
     // 3) 构建下一跳表与 IP 映射。
     //    自身 IP 也写入映射：数据面用它判断"目的 IP 是否就是本机"，从而决定投递到
     //    lwIP 还是继续转发。
-    for (const TopoPeer& peer : peers) {
-        if (peer.peer_id == self_peer_id && peer.has_ipv4) {
-            next.self_ipv4 = peer.ipv4;
-            break;
-        }
-    }
     for (size_t i = 0; i < node_count; ++i) {
         if (dist[i] == kInfiniteHops) {
             continue;  // 不可达：不进入快照
@@ -163,7 +157,6 @@ void RouteTable::recompute(const Topology& topo, uint32_t self_peer_id) noexcept
         if (!is_self && next.nh_count < next.nh.size()) {
             next.nh[next.nh_count].dst = node_peer[i];
             next.nh[next.nh_count].nh = first_hop[i];
-            next.nh[next.nh_count].hops = dist[i];
             ++next.nh_count;
         }
         for (const TopoPeer& peer : peers) {

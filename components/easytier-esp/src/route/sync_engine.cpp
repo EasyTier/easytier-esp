@@ -6,7 +6,6 @@
 
 #include <cstring>
 
-#include "crypto/kdf.hpp"
 #include "support/log.hpp"
 #include "support/random.hpp"
 
@@ -30,14 +29,11 @@ void SyncEngine::configure(const Config& config, uint32_t my_peer_id) noexcept {
     config_.static_ipv4 = config.static_ipv4;
     config_.static_prefix = config.static_prefix;
     config_.dhcp = config.dhcp;
-    config_.dhcp_has_subnet = config.dhcp_has_subnet;
-    config_.dhcp_subnet = config.dhcp_subnet;
-    config_.dhcp_prefix = config.dhcp_prefix;
     my_peer_id_ = my_peer_id;
     reset();
     my_ipv4_ = config_.has_static_ipv4 ? config_.static_ipv4 : 0;
     my_prefix_ = config_.has_static_ipv4 ? config_.static_prefix : 24;
-    dhcp_.configure(config_.dhcp_has_subnet, config_.dhcp_subnet, config_.dhcp_prefix);
+    dhcp_.configure(config.dhcp_has_subnet, config.dhcp_subnet, config.dhcp_prefix);
     dhcp_.reset();
 }
 
@@ -120,16 +116,6 @@ void SyncEngine::on_peer_down(uint32_t remote_peer_id) noexcept {
     }
 }
 
-/** @brief 集合查询。 */
-bool SyncEngine::is_active_peer(uint32_t peer_id) const noexcept {
-    for (size_t i = 0; i < active_peer_count_; ++i) {
-        if (active_peers_[i].peer_id == peer_id) {
-            return true;
-        }
-    }
-    return false;
-}
-
 /** @brief 查询某对端的会话 id（未知返回 0）。 */
 uint64_t SyncEngine::session_id_of(uint32_t peer_id) const noexcept {
     for (size_t i = 0; i < active_peer_count_; ++i) {
@@ -174,7 +160,7 @@ bool SyncEngine::build_self_info(uint32_t now) noexcept {
     info.network_length = my_prefix_;
     // 首版能力：支持邻接收敛、禁用 P2P；不宣告 public server / avoid relay。
     info.feature_flags = peer_feature::SupportConnListSync | peer_feature::DisableP2p;
-    info.hostname = config_.hostname_view();
+    info.hostname = config_.hostname.view();
     info.last_update_secs = now / 1000;  // 仅参考；对端会用本地时间覆盖
     const size_t len = encode_route_peer_info(info, self_peer_info_);
     if (len == 0) {
@@ -203,13 +189,12 @@ bool SyncEngine::update_dhcp(uint32_t now, uint32_t random_hint) noexcept {
     collect_used_addresses();
     const DhcpResult result = dhcp_.evaluate(has_routes_, dhcp_used_, random_hint);
     if (result.decision == DhcpDecision::WaitForPeers) {
-        return false;
-    }
-    if (result.decision == DhcpDecision::Unchanged) {
-        dhcp_.commit(result);
-        return false;
+        return false;  // 等对端先通告子网，本轮不提交
     }
     dhcp_.commit(result);
+    if (result.decision == DhcpDecision::Unchanged) {
+        return false;
+    }
     my_ipv4_ = result.address;
     my_prefix_ = result.prefix;
     ET_LOGI(kTag, "dhcp assigned virtual ip=%08x/%u", static_cast<unsigned>(result.address),

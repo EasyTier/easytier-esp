@@ -4,21 +4,15 @@
  */
 #include "peer/keepalive.hpp"
 
+#include "support/time.hpp"
+
 namespace et {
-namespace {
-
-/** @brief 时间是否已到（处理毫秒回绕）。 */
-[[nodiscard]] bool due(uint32_t now_ms, uint32_t target_ms) noexcept {
-    return static_cast<int32_t>(now_ms - target_ms) >= 0;
-}
-
-}  // namespace
 
 /** @brief 复位状态：间隔回到最小、失败清零。 */
-void Keepalive::reset(uint32_t now_ms, uint32_t first_delay_ms) noexcept {
+void Keepalive::reset(uint32_t now_ms) noexcept {
     seq_ = 0;
     interval_ms_ = kMinIntervalMs;
-    next_send_ms_ = now_ms + first_delay_ms;
+    next_send_ms_ = now_ms + kMinIntervalMs;
     deadline_ms_ = 0;
     failures_ = 0;
     awaiting_ = false;
@@ -31,7 +25,7 @@ KeepaliveAction Keepalive::tick(uint32_t now_ms) noexcept {
         return KeepaliveAction::None;
     }
     // 1) 未完成的 Ping 超时（固定 2 秒，与发送间隔无关）。
-    if (awaiting_ && due(now_ms, deadline_ms_)) {
+    if (awaiting_ && deadline_reached(now_ms, deadline_ms_)) {
         awaiting_ = false;
         ++failures_;
         // 出现丢包时立刻回到最小间隔快速探测，便于网络恢复后尽快发现。
@@ -43,7 +37,7 @@ KeepaliveAction Keepalive::tick(uint32_t now_ms) noexcept {
         }
     }
     // 2) 到点则发送新的 Ping（若上一个仍在等待响应，等它超时后再发）。
-    if (!awaiting_ && due(now_ms, next_send_ms_)) {
+    if (!awaiting_ && deadline_reached(now_ms, next_send_ms_)) {
         awaiting_ = true;
         deadline_ms_ = now_ms + kResponseTimeoutMs;
         ++seq_;

@@ -40,7 +40,6 @@ struct RouteSnapshot {
     struct NhEntry {
         uint32_t dst = 0;  ///< 目的节点
         uint32_t nh = 0;   ///< 下一跳节点（直连）
-        uint16_t hops = 0; ///< 跳数
     };
 
     std::array<IpEntry, kMaxRoutePeers> ip_map{};  ///< IP 映射表
@@ -48,7 +47,6 @@ struct RouteSnapshot {
     std::array<NhEntry, kMaxRoutePeers> nh{};      ///< 下一跳表
     size_t nh_count = 0;                           ///< 条目数
     uint32_t self_peer_id = 0;                     ///< 本节点
-    uint32_t self_ipv4 = 0;                        ///< 本节点虚拟 IP（0 表示未知）
 
     /** @brief 精确查找某虚拟 IP 对应的节点；0 表示不可达。 */
     [[nodiscard]] uint32_t lookup_ip(uint32_t ip) const noexcept;

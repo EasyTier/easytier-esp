@@ -31,7 +31,6 @@ enum class DataAction : uint8_t {
 struct DataPlan {
     DataAction action = DataAction::Drop;  ///< 动作
     uint32_t next_hop = kInvalidPeerId;    ///< 转发时的下一跳
-    bool local_delivery = false;           ///< 是否投递本机
 };
 
 /**
@@ -43,18 +42,6 @@ struct DataPlan {
 [[nodiscard]] DataPlan plan_inbound(const RouteSnapshot& snapshot,
                                     const PeerManagerHeader& hdr,
                                     uint8_t counter_limit) noexcept;
-
-/**
- * @brief 构造出站数据帧（PM 头 + IP 报文，未加密）。
- * @param from_peer_id 本节点
- * @param to_peer_id 目标节点
- * @param ip_packet 虚拟 IPv4 报文
- * @param out 输出缓冲区（容量需 >= 16 + ip_packet.size()）
- * @return 写入字节数；0 表示参数非法或缓冲区不足
- */
-[[nodiscard]] size_t build_data_frame(uint32_t from_peer_id, uint32_t to_peer_id,
-                                      std::span<const uint8_t> ip_packet,
-                                      std::span<uint8_t> out) noexcept;
 
 /**
  * @brief 转发前的计数更新。

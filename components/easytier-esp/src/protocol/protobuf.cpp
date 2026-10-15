@@ -126,24 +126,6 @@ bool ProtoWriter::put_string(uint32_t field, std::string_view value) noexcept {
            put_raw({reinterpret_cast<const uint8_t*>(value.data()), value.size()});
 }
 
-/** @brief 写入 fixed32，0 省略（小端平台直接拷贝）。 */
-bool ProtoWriter::put_fixed32(uint32_t field, uint32_t value) noexcept {
-    if (value == 0) {
-        return true;
-    }
-    return put_tag(field, PbWireType::Fixed32) &&
-           put_raw(Bytes(reinterpret_cast<const uint8_t*>(&value), 4));
-}
-
-/** @brief 写入 fixed64，0 省略。 */
-bool ProtoWriter::put_fixed64(uint32_t field, uint64_t value) noexcept {
-    if (value == 0) {
-        return true;
-    }
-    return put_tag(field, PbWireType::Fixed64) &&
-           put_raw(Bytes(reinterpret_cast<const uint8_t*>(&value), 8));
-}
-
 /** @brief 追加原始字节（缓冲区不足时置失败标记）。 */
 bool ProtoWriter::put_raw(Bytes raw) noexcept {
     if (len_ + raw.size() > out_.size()) {

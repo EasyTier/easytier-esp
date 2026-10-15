@@ -93,8 +93,6 @@ public:
 
     /** @brief 是否还有待发送数据。 */
     [[nodiscard]] bool has_pending_tx() const noexcept { return tx_count_ != 0; }
-    /** @brief 待发送字节数（含长度前缀）。 */
-    [[nodiscard]] size_t pending_tx_bytes() const noexcept;
 
     /** @brief 发送侧是否已满（用于背压判断）。 */
     [[nodiscard]] bool tx_full() const noexcept { return tx_count_ == kTxSlots; }

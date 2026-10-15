@@ -112,9 +112,6 @@ public:
     /** @brief 清空（连接断开时调用）。 */
     void reset() noexcept;
 
-    /** @brief 当前挂起事务数。 */
-    [[nodiscard]] size_t pending() const noexcept;
-
 private:
     /** @brief 一个挂起事务。 */
     struct Entry {

@@ -138,9 +138,6 @@ public:
     /** @brief 清空所有槽位（连接断开时调用）。 */
     void reset() noexcept;
 
-    /** @brief 当前占用中的槽位数（用于测试与统计）。 */
-    [[nodiscard]] size_t active_slots() const noexcept;
-
 private:
     /** @brief 一个重组槽位。 */
     struct Slot {

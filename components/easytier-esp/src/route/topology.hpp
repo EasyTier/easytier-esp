@@ -114,13 +114,7 @@ public:
     [[nodiscard]] std::span<const TopoConnRow> conn_rows() const noexcept {
         return {rows_.data(), row_count_};
     }
-    /** @brief 当前节点数（含占位）。 */
-    [[nodiscard]] size_t peer_count() const noexcept { return peer_count_; }
-    /** @brief 参与建图的节点数。 */
-    [[nodiscard]] size_t graph_peer_count() const noexcept;
 
-    /** @brief 是否为"某行声明了 src → dst"（有向）。 */
-    [[nodiscard]] bool edge_exists(uint32_t src, uint32_t dst) const noexcept;
 
     /** @brief 拓扑槽位索引（不存在返回 kMaxPeers）。 */
     [[nodiscard]] size_t index_of(uint32_t peer_id) const noexcept;

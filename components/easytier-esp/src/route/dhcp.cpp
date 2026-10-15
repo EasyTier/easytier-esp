@@ -53,9 +53,9 @@ bool Ipv4UseSet::contains(uint32_t addr, uint8_t prefix) const noexcept {
  * @brief 配置默认子网。
  * @details 与上游一致：只要启用了 dhcp，就**总是**存在一个默认子网（配置值或内置的
  *          10.126.126.0/24），它只是"最后手段"——先等两轮，看有没有节点通告子网。
+ * @note 必须在任何 @ref evaluate 之前调用；@ref evaluate 不再为"未配置"保留分支。
  */
 void DhcpAllocator::configure(bool has_subnet, uint32_t subnet, uint8_t prefix) noexcept {
-    has_default_subnet_ = true;
     default_subnet_ = has_subnet ? subnet : kDefaultDhcpSubnet;
     default_prefix_ = has_subnet ? prefix : kDefaultDhcpPrefix;
 }
@@ -82,12 +82,6 @@ void DhcpAllocator::commit(const DhcpResult& result) noexcept {
 DhcpResult DhcpAllocator::evaluate(bool has_routes, const Ipv4UseSet& used,
                                    uint32_t random_hint) noexcept {
     DhcpResult result{};
-
-    // 理论上不会发生（启用 dhcp 时默认子网总是存在）；保留判断以对齐上游结构。
-    if (!has_routes && !has_default_subnet_) {
-        result.decision = DhcpDecision::WaitForPeers;
-        return result;
-    }
 
     // 1) 选择子网：优先沿用当前子网内的通告，其次取通告子网中最靠前的那个。
     const Ipv4Use* chosen = nullptr;
@@ -128,10 +122,6 @@ DhcpResult DhcpAllocator::evaluate(bool has_routes, const Ipv4UseSet& used,
         result.prefix = current_prefix_;
         return result;
     } else {
-        if (!has_default_subnet_) {
-            result.decision = DhcpDecision::WaitForPeers;
-            return result;
-        }
         // 先等几轮，让已持地址的节点有机会先通告子网。
         if (++no_ipv4_rounds_ <= kBootstrappedWaitRounds) {
             result.decision = DhcpDecision::WaitForPeers;

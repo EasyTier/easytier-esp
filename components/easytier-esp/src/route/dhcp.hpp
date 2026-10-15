@@ -86,15 +86,8 @@ public:
     /** @brief 提交一次决策结果（Change 之后调用）。 */
     void commit(const DhcpResult& result) noexcept;
 
-    /** @brief 当前地址是否已知。 */
-    [[nodiscard]] bool has_current() const noexcept { return current_valid_; }
-    /** @brief 当前地址。 */
-    [[nodiscard]] uint32_t current() const noexcept { return current_addr_; }
-    /** @brief 当前前缀。 */
-    [[nodiscard]] uint8_t current_prefix() const noexcept { return current_prefix_; }
 
 private:
-    bool has_default_subnet_ = false;  ///< 是否配置了子网
     uint32_t default_subnet_ = 0;      ///< 配置的子网网络号
     uint8_t default_prefix_ = 24;      ///< 配置的子网前缀
     bool current_valid_ = false;       ///< 当前地址是否有效

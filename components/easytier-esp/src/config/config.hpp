@@ -59,9 +59,6 @@ namespace et {
  */
 void format_uuid_text(const uint8_t* id, char* out) noexcept;
 
-/** @brief 把数值形式的 IPv4 转换为文本，返回的视图指向 @p buf 。 */
-[[nodiscard]] std::string_view ipv4_to_text(uint32_t value, std::array<char, 16>& buf) noexcept;
-
 /**
  * @brief 按上游 hostname 规则规范化后写入 @p out 。
  *

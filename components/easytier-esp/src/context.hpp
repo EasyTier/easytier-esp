@@ -83,7 +83,6 @@ struct ConnSlot {
     TcpConn* conn = nullptr;              ///< 连接对象（堆分配，含收发缓冲）
     std::atomic<uint32_t> peer_id{0};     ///< 握手后的对端 peer id（0 = 未握手/未知）
     std::atomic<uint32_t> generation{0};  ///< 该槽当前代际（0 = 空闲）
-    std::atomic<bool> alive{false};       ///< TCP 是否已建立
 };
 
 /** @brief 队列中传递的小消息（事件/命令）。 */
@@ -91,7 +90,6 @@ struct SmallMessage {
     uint8_t kind = 0;         ///< IoEvent / IoCommand / AppCommand
     uint8_t slot = 0;         ///< 涉及的连接槽（0..kMaxConnSlots-1）
     uint32_t generation = 0;  ///< 连接代际（事件使用）
-    uint32_t peer_id = 0;     ///< 对端 peer id（Disconnected 事件用于清理该对端状态）
 };
 #endif
 
@@ -148,7 +146,6 @@ struct Context {
     // ---- 路由（仅控制面任务访问）------------------------------------------
     /// 路由同步引擎：拓扑、最短路、自身信息与 dhcp 自分配都在其中（可宿主测试）。
     SyncEngine sync{};
-    uint32_t last_sync_ms = 0;            ///< 上次发起/应答同步的时间
     /// 同步请求与 RPC 包装缓冲（放在 Context 里，避免占用控制面任务栈）。
     std::array<uint8_t, SyncEngine::kMaxRequestBytes> sync_request_raw{};
     std::array<uint8_t, SyncEngine::kMaxRequestBytes + 64> sync_rpc_raw{};

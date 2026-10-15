@@ -64,13 +64,17 @@ extern "C" err_t et_netif_init(struct netif* ni) {
     return out;
 }
 
-}  // namespace
-
-/** @brief 判断虚拟网段与物理网段是否重叠（复用配置模块的工具函数）。 */
-bool virtual_netif_overlaps(uint32_t virt_ip, uint8_t virt_prefix, uint32_t phys_ip,
-                            uint8_t phys_prefix) noexcept {
-    return ipv4_prefixes_overlap(virt_ip, virt_prefix, phys_ip, phys_prefix);
+/** @brief 按前缀长度构造 lwIP 的 addr/mask/gw（点对点语义，网关用自身地址）。 */
+void to_lwip_addrs(uint32_t ip, uint8_t prefix, ip4_addr_t& addr, ip4_addr_t& mask,
+                   ip4_addr_t& gw) noexcept {
+    // /0 的前缀没有意义：掩码按 prefix 计算。
+    const uint32_t mask_value = (prefix == 0) ? 0 : (~0u << (32 - prefix));
+    addr = to_lwip(ip);
+    mask = to_lwip(mask_value);
+    gw = to_lwip(ip);
 }
+
+}  // namespace
 
 /** @brief 标准布局类与其首成员可互转，不借用 esp-netif 的 state 存储。 */
 VirtualNetif* VirtualNetif::from_netif(struct netif* ni) noexcept {
@@ -90,11 +94,10 @@ esp_err_t VirtualNetif::create(uint32_t ip, uint8_t prefix, uint16_t mtu, void* 
     rx_queue_ = rx_queue;
     generation_ = generation;
 
-    const ip4_addr_t addr = to_lwip(ip);
-    // /0 的前缀没有意义：掩码按 prefix 计算。
-    const uint32_t mask_value = (prefix == 0) ? 0 : (~0u << (32 - prefix));
-    const ip4_addr_t mask = to_lwip(mask_value);
-    const ip4_addr_t gw = to_lwip(ip);  // 点对点语义，网关用自身地址
+    ip4_addr_t addr{};
+    ip4_addr_t mask{};
+    ip4_addr_t gw{};
+    to_lwip_addrs(ip, prefix, addr, mask, gw);
 
     // IDF 6.1 默认将 state 解释为 esp_netif_t*。raw 网卡不属于 esp-netif，
     // 必须传 nullptr，让其全局地址变化回调跳过本网卡；不能传 VirtualNetif*。
@@ -125,10 +128,10 @@ esp_err_t VirtualNetif::set_address(uint32_t ip, uint8_t prefix) noexcept {
         return ESP_ERR_INVALID_STATE;
     }
     if (prefix > 32) return ESP_ERR_INVALID_ARG;
-    const ip4_addr_t addr = to_lwip(ip);
-    const uint32_t mask_value = (prefix == 0) ? 0 : (~0u << (32 - prefix));
-    const ip4_addr_t mask = to_lwip(mask_value);
-    const ip4_addr_t gw = to_lwip(ip);
+    ip4_addr_t addr{};
+    ip4_addr_t mask{};
+    ip4_addr_t gw{};
+    to_lwip_addrs(ip, prefix, addr, mask, gw);
     const err_t err = netifapi_netif_set_addr(&netif_, &addr, &mask, &gw);
     if (err != ERR_OK) {
         return ESP_FAIL;

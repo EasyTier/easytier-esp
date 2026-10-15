@@ -102,15 +102,4 @@ void RpcTransactions::reset() noexcept {
     }
 }
 
-/** @brief 挂起事务数。 */
-size_t RpcTransactions::pending() const noexcept {
-    size_t count = 0;
-    for (const Entry& entry : entries_) {
-        if (entry.used) {
-            ++count;
-        }
-    }
-    return count;
-}
-
 }  // namespace et

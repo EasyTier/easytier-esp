@@ -82,8 +82,6 @@ public:
     bool put_enum(uint32_t field, int32_t value) noexcept;     ///< 写入枚举（0 省略）
     bool put_bytes(uint32_t field, Bytes value) noexcept;      ///< 写入 bytes（空省略）
     bool put_string(uint32_t field, std::string_view value) noexcept;  ///< 写入 string（空省略）
-    bool put_fixed32(uint32_t field, uint32_t value) noexcept;  ///< 写入 fixed32（0 省略）
-    bool put_fixed64(uint32_t field, uint64_t value) noexcept;  ///< 写入 fixed64（0 省略）
 
     bool put_uint32_present(uint32_t field, uint32_t value) noexcept;  ///< 显式写入 uint32
     bool put_int32_present(uint32_t field, int32_t value) noexcept;    ///< 显式写入 int32
@@ -131,8 +129,6 @@ public:
 
     /** @brief 是否因为输入非法而失败。 */
     [[nodiscard]] bool failed() const noexcept { return failed_; }
-    /** @brief 已消费的字节数。 */
-    [[nodiscard]] size_t consumed() const noexcept { return pos_; }
 
 private:
     /** @brief 读取一个 varint。 */
@@ -178,21 +174,5 @@ template <typename Fn>
     }
     return true;
 }
-
-/** @brief 常用字段号别名，便于代码可读性。 */
-namespace pb {
-
-inline constexpr uint32_t kField1 = 1;
-inline constexpr uint32_t kField2 = 2;
-inline constexpr uint32_t kField3 = 3;
-inline constexpr uint32_t kField4 = 4;
-inline constexpr uint32_t kField5 = 5;
-inline constexpr uint32_t kField6 = 6;
-inline constexpr uint32_t kField7 = 7;
-inline constexpr uint32_t kField8 = 8;
-inline constexpr uint32_t kField9 = 9;
-inline constexpr uint32_t kField10 = 10;
-
-}  // namespace pb
 
 }  // namespace et

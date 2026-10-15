@@ -41,9 +41,9 @@ public:
     /**
      * @brief 复位状态。
      * @param now_ms 当前时间（毫秒）
-     * @param first_delay_ms 首次 Ping 的延迟；传 0 表示"立即发第一个 Ping"
+     * @note 首个 Ping 在 @ref kMinIntervalMs 之后发出（两个调用点原本都传这个值）。
      */
-    void reset(uint32_t now_ms, uint32_t first_delay_ms = 0) noexcept;
+    void reset(uint32_t now_ms) noexcept;
 
     /**
      * @brief 推进状态机。
@@ -61,14 +61,6 @@ public:
 
     /** @brief 最近一次发送的 Ping 序号（用于匹配 Pong）。 */
     [[nodiscard]] uint32_t last_seq() const noexcept { return seq_; }
-    /** @brief 当前发送间隔（毫秒）。 */
-    [[nodiscard]] uint32_t interval_ms() const noexcept { return interval_ms_; }
-    /** @brief 连续失败次数。 */
-    [[nodiscard]] uint32_t failures() const noexcept { return failures_; }
-    /** @brief 是否正在等待 Pong。 */
-    [[nodiscard]] bool awaiting_pong() const noexcept { return awaiting_; }
-    /** @brief 是否已判定关闭。 */
-    [[nodiscard]] bool closed() const noexcept { return closed_; }
 
 private:
     uint32_t seq_ = 0;           ///< Ping 序号（从 1 递增）

@@ -26,7 +26,6 @@ DataPlan plan_inbound(const RouteSnapshot& snapshot, const PeerManagerHeader& hd
     }
     if (hdr.to_peer_id == snapshot.self_peer_id) {
         plan.action = DataAction::DeliverLocal;
-        plan.local_delivery = true;
         return plan;
     }
     // 转发：保持最终目的与密文不变，只递增计数并选择下一跳。
@@ -40,28 +39,6 @@ DataPlan plan_inbound(const RouteSnapshot& snapshot, const PeerManagerHeader& hd
     plan.action = DataAction::Forward;
     plan.next_hop = next_hop;
     return plan;
-}
-
-/** @brief 构造出站数据帧。 */
-size_t build_data_frame(uint32_t from_peer_id, uint32_t to_peer_id,
-                        std::span<const uint8_t> ip_packet, std::span<uint8_t> out) noexcept {
-    if (ip_packet.empty() || to_peer_id == kInvalidPeerId ||
-        out.size() < kPeerManagerHeaderSize + ip_packet.size()) {
-        return 0;
-    }
-    PeerManagerHeader hdr{};
-    hdr.from_peer_id = from_peer_id;
-    hdr.to_peer_id = to_peer_id;
-    hdr.packet_type = static_cast<uint8_t>(PacketType::Data);
-    hdr.flags = 0;  // 加密由调用方按需置位（源节点加密）
-    hdr.forward_counter = 1;
-    hdr.reserved = 0;
-    hdr.len = static_cast<uint32_t>(ip_packet.size());
-    encode_peer_manager_header(out, hdr);
-    for (size_t i = 0; i < ip_packet.size(); ++i) {
-        out[kPeerManagerHeaderSize + i] = ip_packet[i];
-    }
-    return kPeerManagerHeaderSize + ip_packet.size();
 }
 
 /** @brief 转发计数更新（超限返回 false）。 */

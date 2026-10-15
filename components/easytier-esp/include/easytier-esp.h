@@ -62,12 +62,10 @@ inline constexpr size_t kMaxDiagnosticKey = 128;
 /** @brief 配置诊断类别。 */
 enum class ConfigIssue : uint8_t {
     IgnoredParameter,      ///< 合法但未实现的参数/表，已忽略
-    IgnoredPeer,           ///< 入口地址合法但当前不支持（如非 tcp 协议、IPv6）
     SyntaxError,           ///< TOML 语法错误
     InvalidValue,          ///< 已支持字段的取值非法
     MissingRequiredValue,  ///< 缺少必需字段
     ResourceLimit,         ///< 超出文本长度/嵌套深度/节点数/内存预算等容量限制
-    IoError,               ///< 配置文件读取失败
 };
 
 /** @brief 单条配置诊断，只记录字段路径，不记录任何敏感取值。 */
@@ -277,8 +275,6 @@ public:
         }
     }
 
-    /** @brief 是否已达预留容量。 */
-    [[nodiscard]] bool full() const noexcept { return size_ >= capacity_; }
     /** @brief 清空内容（保留已分配的容量）。 */
     void clear() noexcept { size_ = 0; }
     /** @brief 当前条数。 */
@@ -395,16 +391,8 @@ public:
     /** @brief 标记 instance_name 由配置显式给出，使身份推导不再覆盖它。 */
     void mark_instance_name_explicit() noexcept { instance_name_explicit_ = true; }
 
-    [[nodiscard]] std::string_view instance_name_view() const noexcept {
-        return instance_name.view();
-    }
-    [[nodiscard]] std::string_view hostname_view() const noexcept { return hostname.view(); }
-    [[nodiscard]] std::string_view network_name_view() const noexcept {
-        return network_name.view();
-    }
-    [[nodiscard]] std::string_view network_secret_view() const noexcept {
-        return network_secret.view();
-    }
+    // 文本字段本身就是公开的 TextBuffer，直接用 `成员.view()` 读取，
+    // 不再提供一层只做转发的 view getter。
     /** @brief 在 peer 通告其它子网之前使用的 dhcp 子网。 */
     [[nodiscard]] uint32_t dhcp_subnet_or_default() const noexcept {
         return dhcp_has_subnet ? dhcp_subnet : kDefaultDhcpSubnet;

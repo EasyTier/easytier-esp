@@ -23,15 +23,8 @@ namespace et {
 /** @brief PeerFeatureFlag 的位掩码（位号 = 上游字段号 - 1）。 */
 namespace peer_feature {
 
-inline constexpr uint16_t IsPublicServer = 1u << 0;         ///< field 1
 inline constexpr uint16_t AvoidRelayData = 1u << 1;         ///< field 2
-inline constexpr uint16_t KcpInput = 1u << 2;               ///< field 3
-inline constexpr uint16_t NoRelayKcp = 1u << 3;             ///< field 4
 inline constexpr uint16_t SupportConnListSync = 1u << 4;    ///< field 5
-inline constexpr uint16_t QuicInput = 1u << 5;              ///< field 6
-inline constexpr uint16_t NoRelayQuic = 1u << 6;            ///< field 7
-inline constexpr uint16_t IsCredentialPeer = 1u << 7;       ///< field 8
-inline constexpr uint16_t NeedP2p = 1u << 8;                ///< field 9
 inline constexpr uint16_t DisableP2p = 1u << 9;             ///< field 10
 
 }  // namespace peer_feature

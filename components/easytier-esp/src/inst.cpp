@@ -41,9 +41,9 @@ constexpr const char* kTag = "ET.INSTANCE";
 constexpr UBaseType_t kFrameQueueDepth = 4;
 // 单个实例的常驻内存必须保持有界：Context 在堆上分配（大于 16 KiB 的分配会走
 // PSRAM），但仍要有上限，避免后续加入功能时悄悄膨胀。实测组成（ESP32-S3，字节）：
-//   Context 合计 97560
+//   Context 合计 97240
 //     ├─ RpcReassembler（2 槽 × (8 KiB 收包 + 8 KiB 有序缓冲)）33184
-//     ├─ SyncEngine（Topology 22928 + 2 个 ConnList 8968 + 快照 656 + 编码缓冲）约 33000
+//     ├─ SyncEngine（Topology 22928 + 2 个 ConnList 8968 + 快照 524 + 编码缓冲）35240
 //     ├─ RPC 收发缓冲（body 8 KiB + service 4 KiB + 其它）约 14000
 //     ├─ Config 副本（含约 4.4 KiB 的 ConfigReport）
 //     └─ 其它（AEAD 指针、原子量、dhcp/网卡状态等）
@@ -77,9 +77,8 @@ constexpr UBaseType_t kDataTaskPriority = 7;
  * @note 只支持一个实例，所以直接是文件级静态数据，不需要"已被占用"的标记。
  */
 struct Impl {
-    Context ctx{};            ///< 运行上下文
-    bool started = false;     ///< 是否已 start()
-    bool resources = false;   ///< 队列是否已创建
+    Context ctx{};         ///< 运行上下文
+    bool started = false;  ///< 是否已 start()
 };
 
 Impl* g_impl = nullptr;
@@ -100,8 +99,8 @@ void prepare_context(Context& ctx, const Config& config,
     // 配置在构造/init 时已经补齐身份，这里只做拷贝与密钥派生。
     ctx.config = config;
     ctx.options = options;
-    ctx.key = derive_key_128(ctx.config.network_secret_view());
-    ctx.digest = secret_digest(ctx.config.network_name_view(), ctx.config.network_secret_view());
+    ctx.key = derive_key_128(ctx.config.network_secret.view());
+    ctx.digest = secret_digest(ctx.config.network_name.view(), ctx.config.network_secret.view());
     uint32_t peer_id = random_u32();
     ctx.my_peer_id.store(peer_id == 0 ? 1u : peer_id);
 }
@@ -237,37 +236,15 @@ bool wait_tasks(Context& ctx, uint32_t timeout_ms) noexcept {
 void destroy_queues(Context& ctx) noexcept {
     ctx.virtual_netif.destroy();
     ctx.netif_created = false;
-    if (ctx.q_rx_ctrl != nullptr) {
-        vQueueDelete(ctx.q_rx_ctrl);
-        ctx.q_rx_ctrl = nullptr;
-    }
-    if (ctx.q_tx != nullptr) {
-        vQueueDelete(ctx.q_tx);
-        ctx.q_tx = nullptr;
-    }
-    if (ctx.q_evt != nullptr) {
-        vQueueDelete(ctx.q_evt);
-        ctx.q_evt = nullptr;
-    }
-    if (ctx.q_io_cmd != nullptr) {
-        vQueueDelete(ctx.q_io_cmd);
-        ctx.q_io_cmd = nullptr;
-    }
-    if (ctx.q_app_cmd != nullptr) {
-        vQueueDelete(ctx.q_app_cmd);
-        ctx.q_app_cmd = nullptr;
-    }
-    if (ctx.q_rx_data != nullptr) {
-        vQueueDelete(ctx.q_rx_data);
-        ctx.q_rx_data = nullptr;
-    }
-    if (ctx.q_netif_rx != nullptr) {
-        vQueueDelete(ctx.q_netif_rx);
-        ctx.q_netif_rx = nullptr;
-    }
-    if (ctx.q_snapshot != nullptr) {
-        vQueueDelete(ctx.q_snapshot);
-        ctx.q_snapshot = nullptr;
+    // 队列句柄集中销毁：新增队列只需加进这张表，不会再漏一处。
+    QueueHandle_t* const handles[] = {&ctx.q_rx_ctrl, &ctx.q_tx,      &ctx.q_evt,
+                                      &ctx.q_io_cmd, &ctx.q_app_cmd,  &ctx.q_rx_data,
+                                      &ctx.q_netif_rx, &ctx.q_snapshot};
+    for (QueueHandle_t* handle : handles) {
+        if (*handle != nullptr) {
+            vQueueDelete(*handle);
+            *handle = nullptr;
+        }
     }
     if (ctx.task_exit != nullptr) {
         vSemaphoreDelete(ctx.task_exit);
@@ -280,7 +257,6 @@ void destroy_queues(Context& ctx) noexcept {
     for (size_t i = 0; i < kMaxConnSlots; ++i) {
         delete ctx.slots[i].conn;
         ctx.slots[i].conn = nullptr;
-        ctx.slots[i].alive.store(false);
         ctx.slots[i].peer_id.store(0);
         ctx.slots[i].generation.store(0);
     }
@@ -304,7 +280,8 @@ esp_err_t init(const Config& config, const RuntimeOptions& options) noexcept {
     if (err != ESP_OK) {
         return err;
     }
-    // Impl 内含 Context（约 94 KiB：RPC 重组缓冲、拓扑、邻接表、快照、配置副本等）。
+    // Impl 内含 Context（实测 97240 字节 ≈ 95 KiB：RPC 重组缓冲、拓扑、邻接表、
+    // 快照、配置副本等）。
     // 未启用 PSRAM 时可能分配失败，这里给出明确提示而不是只返回 0x101。
     Impl* impl = new (std::nothrow) Impl();
     if (impl == nullptr) {
@@ -329,12 +306,10 @@ esp_err_t start() noexcept {
     const esp_err_t err = start_runtime(g_impl->ctx);
     if (err != ESP_OK) {
         destroy_queues(g_impl->ctx);
-        g_impl->resources = false;
         g_impl->ctx.set_error(err);
         g_impl->ctx.state.store(State::Error);
         return err;
     }
-    g_impl->resources = true;
     g_impl->started = true;
     // Started 事件由控制面任务在进入主循环时上报，保证回调上下文一致。
     return ESP_OK;

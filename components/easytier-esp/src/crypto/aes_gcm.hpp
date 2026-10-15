@@ -14,7 +14,8 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
-#include <span>
+
+#include "support/bytes.hpp"
 
 namespace et {
 
@@ -26,16 +27,11 @@ inline constexpr size_t kAeadNonceSize = 12;
 inline constexpr size_t kAeadTailSize = kAeadTagSize + kAeadNonceSize;
 static_assert(kAeadTailSize == 28);
 
-/** @brief 只读字节视图。 */
-using Bytes = std::span<const uint8_t>;
-/** @brief 可写字节视图。 */
-using MutBytes = std::span<uint8_t>;
-
 /**
  * @brief 一个 AES-128-GCM 上下文（持有导入后的密钥）。
  *
- * @note 目标平台使用 mbedTLS 4.x 的 PSA Crypto 接口（psa_aead_encrypt/decrypt），
- *       宿主测试使用 OpenSSL EVP；两者通过同一头文件在协议层互换。
+ * @note 后端是 mbedTLS 4.x 的 PSA Crypto 接口（psa_aead_encrypt/psa_aead_decrypt），
+ *       组件仅适配 ESP-IDF 6.1，因此没有第二个后端实现。
  * @warning 控制面与数据面各自持有一个实例，禁止跨任务共享同一个实例。
  */
 class AesGcm128 {

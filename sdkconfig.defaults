@@ -1,5 +1,5 @@
 # EasyTier-ESP 示例默认配置
 #
-# 允许的入口 peer 数最多 10 个，加上应用自身的 socket 以及 lwIP 内部占用，
-# 默认的 10 个 socket 不够用，这里提高上限。
+# 可同时连接的入口数由 Kconfig `EASYTIER_ESP_MAX_CONNECTED_PEERS` 决定（上限 8），
+# 加上应用自身的 socket 以及 lwIP 内部占用，默认的 10 个 socket 不够用，这里提高上限。
 CONFIG_LWIP_MAX_SOCKETS=24

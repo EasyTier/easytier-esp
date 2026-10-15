@@ -58,17 +58,12 @@ inline constexpr size_t kTomlMaxArrayItems = 256;
 /** @brief 单张 TOML 表的键数量上限。 */
 inline constexpr size_t kTomlMaxTableKeys = 256;
 
-/** @brief 单个共享帧的字节数：4 字节 TCP 长度前缀 + 2000 字节报文，向上取整。 */
-inline constexpr size_t kFrameBytes = 2048;
-/** @brief 帧池中预留给控制面（握手/Ping/RPC）的额度。 */
-inline constexpr size_t kControlFrameReserve = 8;
-
 // ---------------------------------------------------------------------------
 // 上限守卫
 //
 // Kconfig 的 range 只约束 menuconfig 路径；直接编辑 sdkconfig 可以绕过它。这里把
 // 代码真正能处理的区间再钉一遍：越界会让固件**编译失败**，而不是在运行期以越界/溢出
-// 的形式暴露。宿主测试另有 test_config_limits.cpp 固定默认值与 Kconfig 默认值一致。
+// 的形式暴露。
 // ---------------------------------------------------------------------------
 static_assert(kTomlMaxBytes >= 1024, "TOML 上限过小：至少 1 KiB");
 static_assert(kTomlMaxBytes <= 65536, "TOML 上限过大：与静态缓冲/栈预算不符");

@@ -16,6 +16,7 @@
 #include <cstring>
 #include <new>
 
+#include "protocol/wire.hpp"
 #include "psa/crypto.h"
 #include "support/log.hpp"
 #include "support/random.hpp"
@@ -25,27 +26,21 @@ namespace {
 
 constexpr const char* kTag = "ET.AES";
 
-/** @brief 单帧密文上限：TCP body 上限 2000 字节减去 16 字节 PM 头。 */
-inline constexpr size_t kMaxCiphertext = 2000;
+/** @brief 单帧 [密文|tag|nonce] 上限：TCP body 上限减去 PM 头（与 wire.hpp 同步）。 */
+inline constexpr size_t kMaxCiphertext = kMaxTcpBodyLen - kPeerManagerHeaderSize;
 
 /**
  * @brief 保证 PSA Crypto 已初始化。
  * @return 1 表示可用，0 表示初始化失败。
- * @note psa_crypto_init() 可重复调用；这里用状态缓存避免重复初始化，并用
- *       in_progress 防止递归进入。
+ * @note psa_crypto_init() 可重复调用；这里用状态缓存避免重复初始化。构造发生在
+ *       生命周期串行阶段（两个 AEAD 依次构造，任务在其后才创建），不存在递归进入。
  */
 int ensure_psa_initialized() noexcept {
     static int status = -1;  // -1 = 尚未尝试
-    static bool in_progress = false;
     if (status >= 0) {
         return status;
     }
-    if (in_progress) {
-        return 0;
-    }
-    in_progress = true;
     const psa_status_t st = psa_crypto_init();
-    in_progress = false;
     status = (st == PSA_SUCCESS) ? 1 : 0;
     if (status == 0) {
         ET_LOGE(kTag, "psa_crypto_init failed: %d", static_cast<int>(st));

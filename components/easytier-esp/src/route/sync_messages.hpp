@@ -35,18 +35,6 @@ struct SyncRequestHeader {
     bool is_initiator = false;    ///< tag 3
 };
 
-/**
- * @brief 编码同步请求头。
- * @details 字段 1 与 2 使用显式写入，因此取值全为 0 时也不会产生 0 字节输出，
- *          这样"编码失败(0)"与"空消息"可以区分。
- * @return 写入字节数；0 表示缓冲区不足
- */
-[[nodiscard]] size_t encode_sync_request_header(const SyncRequestHeader& header,
-                                                MutBytes out) noexcept;
-
-/** @brief 解码同步请求头（其余字段跳过）。 */
-[[nodiscard]] bool decode_sync_request_header(Bytes in, SyncRequestHeader& out) noexcept;
-
 /** @brief 解析后的同步请求：各字段以视图给出，指向输入缓冲区。 */
 struct SyncRequestView {
     SyncRequestHeader header{};        ///< 公共头部
@@ -65,7 +53,6 @@ struct SyncRequestView {
 struct SyncRequestFields {
     SyncRequestHeader header{};  ///< 公共头部
     Bytes peer_infos{};          ///< RoutePeerInfos 编码结果（可为空）
-    Bytes conn_bitmap{};         ///< RouteConnBitmap 编码结果（与 conn_list 二选一）
     Bytes conn_list{};           ///< RouteConnPeerList 编码结果
 };
 

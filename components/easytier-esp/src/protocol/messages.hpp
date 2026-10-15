@@ -123,14 +123,6 @@ struct RpcResponseRef {
 /** @brief 解码 RpcResponse。 */
 bool decode_rpc_response(Bytes in, RpcResponseRef& out) noexcept;
 /**
- * @brief 编码 RpcResponse。
- * @return 写入字节数；0 表示缓冲区不足**或编码结果本身就是空消息**，需要区分时
- *         请使用 encode_rpc_response_checked()。
- */
-size_t encode_rpc_response(Bytes response, Bytes error_raw, uint64_t runtime_us,
-                           MutBytes out) noexcept;
-
-/**
  * @brief 编码 RpcResponse，并明确区分"空消息"与"编码失败"。
  * @param out_len 输出实际写入长度（可以为 0，表示合法的空 RpcResponse）
  * @return false 表示缓冲区不足
@@ -146,8 +138,6 @@ bool encode_rpc_response_checked(Bytes response, Bytes error_raw, uint64_t runti
  */
 size_t encode_error_execute(std::string_view message, MutBytes out) noexcept;
 
-/** @brief 压缩算法取值：Invalid。 */
-inline constexpr int32_t kCompressionInvalid = 0;
 /** @brief 压缩算法取值：None（本 profile 发送与接受的值）。 */
 inline constexpr int32_t kCompressionNone = 1;
 /** @brief 压缩算法取值：Zstd（本 profile 不支持）。 */

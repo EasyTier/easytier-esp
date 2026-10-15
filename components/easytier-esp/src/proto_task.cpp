@@ -286,7 +286,7 @@ bool send_sync_request(Context& ctx, uint32_t generation, uint32_t remote_peer_i
     tmpl.transaction_id = transaction_id;
     tmpl.is_request = true;
     tmpl.trace_id = 0;
-    tmpl.descriptor.domain_name = ctx.config.network_name_view();
+    tmpl.descriptor.domain_name = ctx.config.network_name.view();
     tmpl.descriptor.proto_name = kOspfProtoName;
     tmpl.descriptor.service_name = kOspfServiceName;
     tmpl.descriptor.method_index = kOspfSyncMethodIndex;
@@ -369,7 +369,7 @@ bool physical_subnet_overlaps(uint32_t addr, uint8_t prefix) noexcept {
     for (uint32_t bit = 0x80000000u; bit != 0 && (phys_mask & bit) != 0; bit >>= 1) {
         ++phys_prefix;
     }
-    return virtual_netif_overlaps(addr, prefix, phys_ip, phys_prefix);
+    return ipv4_prefixes_overlap(addr, prefix, phys_ip, phys_prefix);
 }
 
 void handle_rpc_response(Context& ctx, uint32_t generation, const RpcPacketRef& packet,
@@ -412,13 +412,13 @@ void proto_task(void* arg) noexcept {
     auto& ctx = *static_cast<Context*>(arg);
 
     HandshakeExpectation expect{};
-    expect.network_name = ctx.config.network_name_view();
+    expect.network_name = ctx.config.network_name.view();
     expect.digest = ctx.digest;
     expect.my_peer_id = ctx.my_peer_id.load();
 
     // 注册 OSPF 路由同步服务（M2 返回空拓扑，M3 填充真实信息）。
     if (ctx.registry.size() == 0) {
-        const RpcServiceId id{ctx.config.network_name_view(), kOspfProtoName, kOspfServiceName,
+        const RpcServiceId id{ctx.config.network_name.view(), kOspfProtoName, kOspfServiceName,
                               kOspfSyncMethodIndex};
         if (!ctx.registry.add(id, &handle_ospf_sync, &ctx)) {
             ctx.set_error(ESP_FAIL);
@@ -458,7 +458,7 @@ void proto_task(void* arg) noexcept {
         peer_up[slot] = false;
         session_generation[slot] = 0;
         handshake_sent[slot] = false;
-        keepalive[slot].reset(now_ms(), Keepalive::kMinIntervalMs);
+        keepalive[slot].reset(now_ms());
         ctx.slots[slot].peer_id.store(0);
         publish_direct_peers();
     };
@@ -576,7 +576,7 @@ void proto_task(void* arg) noexcept {
                     ctx.slots[slot].peer_id.store(remote);
                     ctx.state.store(State::Syncing);
                     peer_up[slot] = true;
-                    keepalive[slot].reset(now, Keepalive::kMinIntervalMs);
+                    keepalive[slot].reset(now);
                     last_sync_ms = 0;  // 下一轮立即发起路由同步
                     session_id[slot] = random_u64();
                     if (session_id[slot] == 0) {
