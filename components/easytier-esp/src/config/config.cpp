@@ -1,11 +1,12 @@
 /**
  * @file config.cpp
- * @brief 配置解析与校验实现（IPv4/CIDR/UUID/主机名规范化）。
+ * @brief @ref et::Config 的实现与配置解析助手（IPv4/CIDR/UUID/主机名/入口 URI）。
  */
 #include "config/config.hpp"
 
 #include <cstring>
 
+#include "config/toml.hpp"
 #include "support/log.hpp"
 #include "support/random.hpp"
 
@@ -66,32 +67,160 @@ constexpr const char* kTag = "ET.CONFIG";
 
 }  // namespace
 
-/** @brief 复位为默认配置（instance_name/network_name = "default"，密钥为空串）。 */
-void apply_config_defaults(StoredConfig& cfg) noexcept {
-    // 入口列表可能分配得较大：先把已分配容量搬出来再复位，避免每次初始化都重新分配。
-    PeerEndpointList peers = std::move(cfg.peers);
-    peers.clear();
-    cfg = StoredConfig{};
-    cfg.peers = std::move(peers);
-    (void)set_fixed_string(cfg.instance_name, "default");
-    (void)set_fixed_string(cfg.network_name, "default");
-    (void)set_fixed_string(cfg.hostname, "Espressif");
-    cfg.mtu = kDefaultMtu;
-    cfg.static_prefix = 24;
-    cfg.dhcp_subnet = kDefaultDhcpSubnet;
-    cfg.enable_encryption = true;  // 与上游 common.proto 的 enable_encryption 默认值一致
+// ---------------------------------------------------------------------------
+// Config：构造、身份与诊断
+// ---------------------------------------------------------------------------
+
+/** @brief 复位为缺省值（不补齐身份，由 finalize_identity() 负责）。 */
+void Config::reset_to_defaults() noexcept {
+    instance_name_explicit_ = false;
+    has_instance_id = false;
+    instance_name.clear();
+    hostname.clear();
+    instance_id.fill(0);
+    (void)network_name.assign(kDefaultNetworkName);
+    network_secret.zeroize();
+    peers.clear();  // 保留已分配的容量，避免每次初始化都重新分配
+    has_static_ipv4 = false;
+    static_ipv4 = 0;
+    static_prefix = 24;
+    dhcp = false;
+    dhcp_has_subnet = false;
+    dhcp_subnet = kDefaultDhcpSubnet;
+    dhcp_prefix = kDefaultDhcpPrefix;
+    enable_encryption = true;
+    mtu = kDefaultMtu;
 }
 
-/** @brief 对齐上游 get_id() 的延迟生成与缓存，主机名由 ESP Host 提供回退值。 */
-void finalize_config_identity(StoredConfig& cfg) noexcept {
-    if (!cfg.has_instance_id) {
-        fill_random(cfg.instance_id);
-        cfg.instance_id[6] = static_cast<uint8_t>((cfg.instance_id[6] & 0x0f) | 0x40);
-        cfg.instance_id[8] = static_cast<uint8_t>((cfg.instance_id[8] & 0x3f) | 0x80);
-        cfg.has_instance_id = true;
-    }
-    if (cfg.hostname[0] == '\0') (void)set_fixed_string(cfg.hostname, "Espressif");
+/** @brief 构造缺省配置，并立即补齐实例身份。 */
+Config::Config() noexcept {
+    reset_to_defaults();
+    finalize_identity();
 }
+
+/** @brief 拷贝构造：文本字段与入口列表都深拷贝，分配失败时把错误记录在副本里。 */
+Config::Config(const Config& other) noexcept
+    : instance_id(other.instance_id),
+      has_instance_id(other.has_instance_id),
+      has_static_ipv4(other.has_static_ipv4),
+      static_ipv4(other.static_ipv4),
+      static_prefix(other.static_prefix),
+      dhcp(other.dhcp),
+      dhcp_has_subnet(other.dhcp_has_subnet),
+      dhcp_subnet(other.dhcp_subnet),
+      dhcp_prefix(other.dhcp_prefix),
+      enable_encryption(other.enable_encryption),
+      mtu(other.mtu),
+      report_(other.report_),
+      last_error_(other.last_error_),
+      instance_name_explicit_(other.instance_name_explicit_) {
+    // TextBuffer 成员在此按需分配深拷贝；任何一步失败都记录错误但保留已拷贝的部分。
+    esp_err_t err = instance_name.copy_from(other.instance_name);
+    if (err == ESP_OK) err = hostname.copy_from(other.hostname);
+    if (err == ESP_OK) err = network_name.copy_from(other.network_name);
+    if (err == ESP_OK) err = network_secret.copy_from(other.network_secret);
+    if (err == ESP_OK) err = peers.copy_from(other.peers);
+    if (err != ESP_OK) {
+        set_error(err);
+        ET_LOGE(kTag, "cannot copy config (%d)", static_cast<int>(err));
+    }
+}
+
+/** @brief 拷贝赋值。 */
+Config& Config::operator=(const Config& other) noexcept {
+    if (this != &other) {
+        // 复用拷贝构造 + 移动赋值的写法，避免重复字段列表。
+        Config copy(other);
+        *this = std::move(copy);
+    }
+    return *this;
+}
+
+/** @brief 移动构造（不分配）。 */
+Config::Config(Config&& other) noexcept = default;
+
+/** @brief 移动赋值（不分配）。 */
+Config& Config::operator=(Config&& other) noexcept = default;
+
+/**
+ * @brief 补齐实例身份。
+ * @details 与用户约定一致：hostname 缺省回退 Espressif；instance_name 未显式配置时取
+ *          hostname；instance_id 缺省生成随机 UUID v4（显式 UUID 含全零都保留）。
+ */
+void Config::finalize_identity() noexcept {
+    if (hostname.empty()) {
+        (void)hostname.assign(kDefaultHostname);
+    }
+    if (!instance_name_explicit_) {
+        (void)instance_name.assign(hostname.view());
+    }
+    if (!has_instance_id) {
+        fill_random(instance_id);
+        // RFC 4122：版本位固定为 4，变体位固定为 10xx。
+        instance_id[6] = static_cast<uint8_t>((instance_id[6] & 0x0f) | 0x40);
+        instance_id[8] = static_cast<uint8_t>((instance_id[8] & 0x3f) | 0x80);
+        has_instance_id = true;
+    }
+}
+
+/** @brief 清空诊断报告。 */
+void Config::clear_report() noexcept {
+    report_.count = 0;
+    report_.omitted_count = 0;
+    for (ConfigDiagnostic& d : report_.items) {
+        d = ConfigDiagnostic{};
+    }
+}
+
+/** @brief 追加一条诊断；只记录字段路径，不记录取值。 */
+void Config::add_diagnostic(ConfigIssue issue, uint32_t line, uint32_t column,
+                            std::string_view key) noexcept {
+    if (report_.count >= kMaxDiagnostics) {
+        ++report_.omitted_count;
+        return;
+    }
+    ConfigDiagnostic& d = report_.items[report_.count++];
+    d.issue = issue;
+    d.line = line;
+    d.column = column;
+    const size_t n = key.size() < kMaxDiagnosticKey ? key.size() : kMaxDiagnosticKey - 1;
+    for (size_t i = 0; i < n; ++i) {
+        d.key[i] = key[i];
+    }
+    d.key[n] = '\0';
+}
+
+/** @brief 记录错误码（保留首个非 OK 的值）。 */
+void Config::set_error(esp_err_t err) noexcept {
+    if (err != ESP_OK && last_error_ == ESP_OK) {
+        last_error_ = err;
+    }
+}
+
+/**
+ * @brief 用 TOML 文本全量替换配置。
+ * @details 先复位为缺省值，再逐字段解析，最后重新补齐身份——因此未在 TOML 里显式给出的
+ *          instance_id 会在每次 init 时重新生成，上一次的残留不会影响本次结果。
+ *          失败时已解析的字段保留，错误码写入 last_error。
+ */
+esp_err_t Config::init(std::string_view toml) noexcept {
+    reset_to_defaults();
+    last_error_ = ESP_OK;
+    const esp_err_t err = parse_toml_into(*this, toml);
+    // 即使解析失败也补齐身份，保证对象至少是可用的。
+    finalize_identity();
+    set_error(err);
+    return err;
+}
+
+/** @brief 用 TOML 文本构造（转发到 init，错误记录在对象内）。 */
+Config::Config(std::string_view toml) noexcept {
+    (void)init(toml);
+}
+
+// ---------------------------------------------------------------------------
+// 解析助手
+// ---------------------------------------------------------------------------
 
 /** @brief 严格解析点分十进制 IPv4（每段 0..255，不接受前导 '+' 或空白）。 */
 bool parse_ipv4_numeric(std::string_view text, uint32_t& out) noexcept {
@@ -225,11 +354,13 @@ std::string_view ipv4_to_text(uint32_t value, std::array<char, 16>& buf) noexcep
 
 /**
  * @brief 按上游规则规范化主机名。
- * @details 剔除控制字符、最多保留 32 个 Unicode 码点、UTF-8 结果不超过 127 字节；
- *          遇到非法 UTF-8 即停止（与上游逐字符过滤的语义一致）。
+ * @details 剔除控制字符、最多保留 32 个 Unicode 码点；遇到非法 UTF-8 即停止（与上游
+ *          逐字符过滤的语义一致）。32 码点 × 最多 4 字节 = 128 字节，因此这里用一个
+ *          有界的栈缓冲暂存后一次性写入 @p out ；字段本身没有固定容量限制。
  */
-std::string_view normalize_hostname(std::string_view in,
-                                    std::array<char, kMaxHostnameBytes>& out) noexcept {
+esp_err_t normalize_hostname(std::string_view in, TextBuffer& out) noexcept {
+    // 32 个码点在 UTF-8 下最多 128 字节，加结尾 NUL 共 129。
+    std::array<char, 32 * 4 + 1> staging{};
     size_t written = 0;
     size_t code_points = 0;
     size_t i = 0;
@@ -246,15 +377,15 @@ std::string_view normalize_hostname(std::string_view in,
             break;
         }
         const size_t len = i - start;
-        if (written + len >= out.size()) {
+        if (written + len >= staging.size()) {
             break;
         }
-        std::memcpy(out.data() + written, in.data() + start, len);
+        std::memcpy(staging.data() + written, in.data() + start, len);
         written += len;
         ++code_points;
     }
-    out[written] = '\0';
-    return {out.data(), written};
+    staging[written] = '\0';
+    return out.assign(std::string_view(staging.data(), written));
 }
 
 /** @brief 取 IPv4 网络号（prefix 为 0 时返回 0）。 */
@@ -276,7 +407,8 @@ bool ipv4_prefixes_overlap(uint32_t a, uint8_t prefix_a, uint32_t b, uint8_t pre
 }
 
 /** @brief 严格校验协议、主机与端口，绝不把错误入口留到运行期 DNS/连接阶段。 */
-bool parse_peer_endpoint(std::string_view uri, PeerEndpoint& out) noexcept {
+bool parse_peer_endpoint(std::string_view uri, std::string_view& host_out,
+                         uint16_t& port_out) noexcept {
     constexpr std::string_view scheme = "tcp://";
     if (!uri.starts_with(scheme)) return false;
     const auto rest = uri.substr(scheme.size());
@@ -284,7 +416,7 @@ bool parse_peer_endpoint(std::string_view uri, PeerEndpoint& out) noexcept {
     if (colon == std::string_view::npos || colon == 0) return false;
     const auto host = rest.substr(0, colon);
     const auto port_text = rest.substr(colon + 1);
-    if (host.size() > kMaxPeerHostBytes || port_text.empty() || port_text.size() > 5) return false;
+    if (host.empty() || port_text.empty() || port_text.size() > 5) return false;
     bool numeric = true;
     for (const char c : host) {
         const bool digit = c >= '0' && c <= '9';
@@ -312,10 +444,8 @@ bool parse_peer_endpoint(std::string_view uri, PeerEndpoint& out) noexcept {
         port = port * 10 + static_cast<uint32_t>(c - '0');
     }
     if (port == 0 || port > 65535) return false;
-    PeerEndpoint parsed{};
-    if (!set_fixed_string(parsed.host, host)) return false;
-    parsed.port = static_cast<uint16_t>(port);
-    out = parsed;
+    host_out = host;
+    port_out = static_cast<uint16_t>(port);
     return true;
 }
 
@@ -323,9 +453,9 @@ bool parse_peer_endpoint(std::string_view uri, PeerEndpoint& out) noexcept {
  * @brief 结构完整性校验。
  * @details 要求：至少 1 个入口、必须配置静态 IPv4 或 dhcp、MTU 在范围内、网络名非空、
  *          每个入口都有主机名与端口。入口数量本身没有上限，只有可同时连接的数量由
- *          Kconfig 决定（见 @ref kMaxConnectedPeers）。
+ *          Kconfig 决定（见 kMaxConnectedPeers）。
  */
-esp_err_t validate_stored_config(const StoredConfig& cfg) noexcept {
+esp_err_t validate_config(const Config& cfg) noexcept {
     if (cfg.peers.size() == 0) {
         ET_LOGE(kTag, "no usable entry peer configured");
         return ESP_ERR_INVALID_ARG;
@@ -334,114 +464,21 @@ esp_err_t validate_stored_config(const StoredConfig& cfg) noexcept {
         ET_LOGE(kTag, "neither ipv4 nor dhcp is configured");
         return ESP_ERR_INVALID_ARG;
     }
-    if (cfg.mtu < kMinMtu || cfg.mtu > kMaxMtu) {
+    if (cfg.mtu < kMinMtu || cfg.mtu > kDefaultMtu) {
         ET_LOGE(kTag, "mtu %u out of range", static_cast<unsigned>(cfg.mtu));
         return ESP_ERR_INVALID_ARG;
     }
-    if (cfg.network_name[0] == '\0') {
+    if (cfg.network_name.empty()) {
         ET_LOGE(kTag, "network_name must not be empty");
         return ESP_ERR_INVALID_ARG;
     }
     for (size_t i = 0; i < cfg.peers.size(); ++i) {
-        if (cfg.peers[i].host[0] == '\0' || cfg.peers[i].port == 0) {
+        if (cfg.peers[i].host.empty() || cfg.peers[i].port == 0) {
             ET_LOGE(kTag, "entry peer %u is incomplete", static_cast<unsigned>(i));
             return ESP_ERR_INVALID_ARG;
         }
     }
     return ESP_OK;
-}
-
-/**
- * @brief 由编程式 Config 构造 StoredConfig。
- * @details 仅接受受支持的 tcp:// 入口；其它 scheme、IPv6 或错误 URI 返回错误。
- *          静态 ipv4 存在时 dhcp 被忽略（与上游优先级一致）。
- */
-esp_err_t stored_config_from_config(const Config& config, StoredConfig& out,
-                                    ConfigReport* report) noexcept {
-    apply_config_defaults(out);
-    auto ignore = [report](ConfigIssue issue, const char* key) {
-        if (report == nullptr) {
-            return;
-        }
-        if (report->count < kMaxDiagnostics) {
-            ConfigDiagnostic& d = report->items[report->count++];
-            d.issue = issue;
-            (void)set_fixed_string(d.key, key);
-        } else {
-            ++report->omitted_count;
-        }
-    };
-
-    if (!set_fixed_string(out.instance_name, config.instance_name)) {
-        return ESP_ERR_INVALID_ARG;
-    }
-    std::array<char, kMaxHostnameBytes> normalized{};
-    const auto hostname = normalize_hostname(config.hostname, normalized);
-    if (!hostname.empty()) (void)set_fixed_string(out.hostname, hostname);
-    if (!set_fixed_string(out.network_name, config.network_name)) {
-        return ESP_ERR_INVALID_ARG;
-    }
-    if (!set_fixed_string(out.network_secret, config.network_secret)) {
-        return ESP_ERR_INVALID_ARG;
-    }
-    if (!config.instance_id.empty() && !parse_uuid_text(config.instance_id, out.instance_id)) {
-        ET_LOGE(kTag, "instance_id is not a valid UUID");
-        return ESP_ERR_INVALID_ARG;
-    }
-    out.has_instance_id = !config.instance_id.empty();
-    // 入口数量无固定上限：按实际条数分配。programmatic 入口仍逐个严格校验。
-    if (config.peers.size() != 0) {
-        const esp_err_t reserve_err = out.peers.reserve(config.peers.size());
-        if (reserve_err != ESP_OK) {
-            ET_LOGE(kTag, "cannot allocate %u entry peers",
-                    static_cast<unsigned>(config.peers.size()));
-            return reserve_err;
-        }
-    }
-    for (const std::string_view peer : config.peers) {
-        PeerEndpoint endpoint{};
-        if (!parse_peer_endpoint(peer, endpoint)) {
-            ignore(ConfigIssue::InvalidValue, "peer.uri");
-            ET_LOGE(kTag, "invalid or unsupported entry peer URI");
-            return ESP_ERR_INVALID_ARG;
-        }
-        out.peers.push_back(endpoint);
-    }
-
-    if (!config.virtual_ipv4.empty()) {
-        bool had_prefix = false;
-        uint8_t prefix = 24;
-        uint32_t addr = 0;
-        if (!parse_ipv4_cidr(config.virtual_ipv4, addr, prefix, had_prefix)) {
-            ET_LOGE(kTag, "ipv4 is not a valid IPv4 address or CIDR");
-            return ESP_ERR_INVALID_ARG;
-        }
-        out.has_static_ipv4 = true;
-        out.static_ipv4 = addr;
-        // Upstream normalizes a bare address and /32 to /24.
-        out.static_prefix = (had_prefix && prefix != 32) ? prefix : 24;
-        if (had_prefix && prefix == 32) {
-            ignore(ConfigIssue::IgnoredParameter, "ipv4.prefix");
-        }
-    } else if (config.dhcp) {
-        out.dhcp = true;
-        if (!config.dhcp_subnet.empty()) {
-            uint32_t subnet = 0;
-            uint8_t prefix = 0;
-            bool had_prefix = false;
-            if (!parse_ipv4_cidr(config.dhcp_subnet, subnet, prefix, had_prefix) || !had_prefix ||
-                prefix > 30) {
-                ET_LOGE(kTag, "dhcp subnet must be an IPv4 CIDR with prefix 0..=30");
-                return ESP_ERR_INVALID_ARG;
-            }
-            out.dhcp_has_subnet = true;
-            out.dhcp_subnet = ipv4_network_of(subnet, prefix);
-            out.dhcp_prefix = prefix;
-        }
-    }
-    out.mtu = config.mtu;
-    out.enable_encryption = config.enable_encryption;
-    return validate_stored_config(out);
 }
 
 /** @brief 把 16 字节 UUID 格式化为标准文本（8-4-4-4-12）。 */

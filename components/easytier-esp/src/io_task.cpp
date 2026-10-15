@@ -105,7 +105,7 @@ bool select_entry(const Context& ctx, const std::array<SlotState, kMaxConnSlots>
             if (other == slot || (!states[other].connecting && !states[other].session_open))
                 continue;
             const auto& used = ctx.config.peers[states[other].peer_index];
-            if (used.port == peer.port && std::strcmp(used.host.data(), peer.host.data()) == 0) {
+            if (used.port == peer.port && used.host.view() == peer.host.view()) {
                 occupied = true;
                 break;
             }
@@ -286,7 +286,7 @@ void io_task(void* arg) noexcept {
             if (!deadline_reached(now_ms(), st.retry_at_ms)) continue;
             if (!select_entry(ctx, states, i, st.peer_index)) continue;
             const PeerEndpoint& peer = ctx.config.peers[st.peer_index];
-            if (!conn_slot.conn->begin_connect(peer.host.data(), peer.port)) {
+            if (!conn_slot.conn->begin_connect(peer.host.view(), peer.port)) {
                 st.peer_index = (st.peer_index + 1) % peer_count;
                 st.retry_at_ms = now_ms() + st.backoff_ms;
                 st.backoff_ms = (st.backoff_ms >= kMaxBackoffMs) ? kMaxBackoffMs : st.backoff_ms * 2;

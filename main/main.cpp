@@ -5,7 +5,7 @@
  * @details 示例刻意保持简单，只做应用侧必须负责的事：
  * 1. 初始化 NVS、esp-netif 与默认事件循环；
  * 2. 以 STA 模式连接 WiFi，并在断开时自动重连；
- * 3. 用嵌入的 easytier.toml 初始化 et::Instance；
+ * 3. 用嵌入的 easytier.toml 构造 et::Config，并初始化 et::Inst；
  * 4. 取得 IP 后启动组网并通知 underlay 就绪，失去 IP 时通知断开；
  * 5. 打印组件上报的组网事件。
  *
@@ -30,10 +30,6 @@ namespace {
 
 constexpr const char* kTag = "et_example";
 
-/** @brief 单实例（示例只运行一个 EasyTier 节点）。 */
-et::Instance g_instance;
-/** @brief 配置诊断报告：约 4.5 KiB，放在静态区避免占用 app_main 栈。 */
-et::ConfigReport g_report;
 /** @brief 组网是否已启动（在事件回调中判断，避免重复 start）。 */
 bool g_started = false;
 /** @brief WiFi 重连计数。 */
@@ -98,7 +94,7 @@ const char* state_name(et::State state) {
  */
 void log_status() {
     et::Status status{};
-    if (g_instance.get_status(status) != ESP_OK) {
+    if (et::Inst::get_status(status) != ESP_OK) {
         return;
     }
     char vip[24] = "none";
@@ -121,7 +117,7 @@ void log_status() {
 
 /** @brief 打印实际生效的配置（TOML 的映射结果）。 */
 void log_effective_config() {
-    if (g_instance.get_config_info(g_config_info) != ESP_OK) {
+    if (et::Inst::get_config_info(g_config_info) != ESP_OK) {
         return;
     }
     ESP_LOGI(kTag, "config: instance=%s hostname=%s network=%s instance_id=%s",
@@ -175,7 +171,7 @@ void start_task(void*) {
     start_easytier();
     if (g_started) {
         // 通知组件物理网络就绪：此后组件才会连接入口节点。
-        (void)g_instance.set_underlay_ready(true);
+        (void)et::Inst::set_underlay_ready(true);
     }
     vTaskDelete(nullptr);
 }
@@ -188,15 +184,15 @@ void start_easytier() {
     auto len = static_cast<size_t>(easytier_toml_end - easytier_toml_start);
     // EMBED_TXTFILES 会把 NUL 计入 end-start；它是字符串终止符，不是 TOML 内容。
     if (len != 0 && easytier_toml_start[len - 1] == 0) --len;
-    et::RuntimeOptions runtime_options{};
-    runtime_options.on_event = &on_easytier_event;
-    const esp_err_t init_err = g_instance.init_from_toml(
-        std::string_view(reinterpret_cast<const char*>(easytier_toml_start), len),
-        runtime_options, &g_report);
-    if (init_err != ESP_OK) {
-        ESP_LOGE(kTag, "easytier config rejected: 0x%x", init_err);
-        for (size_t i = 0; i < g_report.count; ++i) {
-            const et::ConfigDiagnostic& d = g_report.items[i];
+    // Config 含约 4.4 KiB 诊断报告，放静态区避免占用本任务 8 KiB 的栈。
+    static et::Config config;
+    const esp_err_t parse_err = config.init(
+        std::string_view(reinterpret_cast<const char*>(easytier_toml_start), len));
+    const et::ConfigReport& report = config.report();
+    if (parse_err != ESP_OK) {
+        ESP_LOGE(kTag, "easytier config rejected: 0x%x", parse_err);
+        for (size_t i = 0; i < report.count; ++i) {
+            const et::ConfigDiagnostic& d = report.items[i];
             ESP_LOGE(kTag, "config issue %d key=%s line=%u column=%u",
                      static_cast<int>(d.issue), d.key.data(), static_cast<unsigned>(d.line),
                      static_cast<unsigned>(d.column));
@@ -204,14 +200,21 @@ void start_easytier() {
         return;
     }
     // 被忽略但不影响使用的配置项以警告形式列出，便于排查"配置没生效"。
-    for (size_t i = 0; i < g_report.count; ++i) {
-        const et::ConfigDiagnostic& d = g_report.items[i];
-        ESP_LOGW(kTag, "ignored config: key=%s", d.key.data());
+    for (size_t i = 0; i < report.count; ++i) {
+        ESP_LOGW(kTag, "ignored config: key=%s", report.items[i].key.data());
+    }
+
+    et::RuntimeOptions runtime_options{};
+    runtime_options.on_event = &on_easytier_event;
+    const esp_err_t init_err = et::Inst::init(config, runtime_options);
+    if (init_err != ESP_OK) {
+        ESP_LOGE(kTag, "easytier init failed: 0x%x", init_err);
+        return;
     }
 
     log_effective_config();
 
-    const esp_err_t start_err = g_instance.start();
+    const esp_err_t start_err = et::Inst::start();
     if (start_err != ESP_OK) {
         ESP_LOGE(kTag, "easytier start failed: 0x%x", start_err);
         return;
@@ -244,7 +247,7 @@ void on_wifi_event(void*, esp_event_base_t base, int32_t id, void* data) {
     if (base == WIFI_EVENT && id == WIFI_EVENT_STA_DISCONNECTED) {
         // 物理网络断开：先通知组件撤销连接与路由，再重连 WiFi。
         if (g_started) {
-            (void)g_instance.set_underlay_ready(false);
+            (void)et::Inst::set_underlay_ready(false);
         }
         const int max_retry = CONFIG_EXAMPLE_WIFI_MAX_RETRY;
         if (max_retry == 0 || g_retry < max_retry) {
@@ -267,7 +270,7 @@ void on_wifi_event(void*, esp_event_base_t base, int32_t id, void* data) {
         } else {
             // WiFi 掉线重连后**必须重新**通知组件物理网络就绪，否则组件会一直停在
             // underlay_ready=false，永远不再连接入口（曾经的真实缺陷）。
-            (void)g_instance.set_underlay_ready(true);
+            (void)et::Inst::set_underlay_ready(true);
         }
 #endif
     }

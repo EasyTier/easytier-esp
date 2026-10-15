@@ -68,7 +68,7 @@ public:
      * @param config 已校验配置
      * @param my_peer_id 本节点 peer id
      */
-    void configure(const StoredConfig& config, uint32_t my_peer_id) noexcept;
+    void configure(const Config& config, uint32_t my_peer_id) noexcept;
 
     /** @brief 复位为初始状态（停止/断开时调用）。 */
     void reset() noexcept;
@@ -197,7 +197,7 @@ private:
      */
     struct EngineConfig {
         std::array<uint8_t, 16> instance_id{};            ///< 实例 UUID
-        std::array<char, kMaxHostnameBytes> hostname{};    ///< 主机名（已规范化）
+        TextBuffer hostname{};                             ///< 主机名（已规范化）
         bool has_static_ipv4 = false;                      ///< 是否配置了静态虚拟 IPv4
         uint32_t static_ipv4 = 0;                          ///< 静态虚拟 IPv4
         uint8_t static_prefix = 24;                        ///< 静态前缀长度
@@ -207,9 +207,7 @@ private:
         uint8_t dhcp_prefix = kDefaultDhcpPrefix;          ///< dhcp 子网前缀长度
 
         /** @brief 主机名视图。 */
-        [[nodiscard]] std::string_view hostname_view() const noexcept {
-            return {hostname.data()};
-        }
+        [[nodiscard]] std::string_view hostname_view() const noexcept { return hostname.view(); }
     };
 
     EngineConfig config_{};              ///< 配置子集（只用到其中少数字段）

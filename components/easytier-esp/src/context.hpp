@@ -1,6 +1,6 @@
 /**
  * @file context.hpp
- * @brief 组件内部运行上下文（Instance::Impl 的实际内容）。
+ * @brief 组件内部运行上下文（全局单实例 et::Inst 的静态状态持有它）。
  *
  * @details 设计要点：
  * - **单一所有者**：socket 只属于 I/O 任务，加解密上下文分属控制面与数据面，
@@ -98,10 +98,10 @@ struct SmallMessage {
 /**
  * @brief 组件运行上下文。
  *
- * @note 由 Instance::Impl 持有；生命周期覆盖所有任务，任务退出确认后才释放。
+ * @note 由 et::Inst 的文件级静态状态持有；生命周期覆盖所有任务，任务退出确认后才释放。
  */
 struct Context {
-    StoredConfig config{};              ///< 校验后的配置
+    Config config{};                    ///< 校验后的配置
     RuntimeOptions options{};           ///< 事件回调等运行期选项
     std::array<uint8_t, 16> key{};      ///< 派生的 AES-128 密钥
     std::array<uint8_t, 32> digest{};   ///< 网络密钥摘要

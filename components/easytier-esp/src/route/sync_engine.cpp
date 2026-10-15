@@ -18,11 +18,14 @@ constexpr const char* kTag = "ET.SYNC";
 }  // namespace
 
 /** @brief 配置引擎并复位状态。 */
-void SyncEngine::configure(const StoredConfig& config, uint32_t my_peer_id) noexcept {
+void SyncEngine::configure(const Config& config, uint32_t my_peer_id) noexcept {
     // 只拷贝引擎真正需要的字段：入口列表可能很大，且引擎根本用不到它。
     config_ = EngineConfig{};
     config_.instance_id = config.instance_id;
-    (void)set_fixed_string(config_.hostname, config.hostname_view());
+    const esp_err_t host_err = config_.hostname.copy_from(config.hostname);
+    if (host_err != ESP_OK) {
+        ET_LOGW(kTag, "cannot copy hostname (%d)", static_cast<int>(host_err));
+    }
     config_.has_static_ipv4 = config.has_static_ipv4;
     config_.static_ipv4 = config.static_ipv4;
     config_.static_prefix = config.static_prefix;

@@ -85,7 +85,7 @@ esp_err_t VirtualNetif::create(uint32_t ip, uint8_t prefix, uint16_t mtu, void* 
     if (created_) {
         return ESP_ERR_INVALID_STATE;
     }
-    if (prefix > 32 || mtu < kMinMtu || mtu > kMaxMtu) return ESP_ERR_INVALID_ARG;
+    if (prefix > 32 || mtu < kMinMtu || mtu > kDefaultMtu) return ESP_ERR_INVALID_ARG;
     mtu_ = mtu;
     rx_queue_ = rx_queue;
     generation_ = generation;

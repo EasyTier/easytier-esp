@@ -1,25 +1,25 @@
 /**
- * @file instance.cpp
- * @brief et::Instance 公开 C++ API 的实现。
+ * @file inst.cpp
+ * @brief @c et::Inst 全局单实例接口的实现。
  *
  * @details 生命周期：
  * @code
- * init*()   → 解析/校验配置、复制字符串、派生密钥（不创建任务）
- * start()   → 创建队列与任务，状态置 WaitingUnderlay
- * stop()    → 置停止标志、等待任务确认退出（可超时）
- * deinit()  → 释放队列与密钥
+ * init(config) → 校验配置、拷贝进上下文、派生密钥（不创建任务）
+ * start()      → 创建队列与任务，状态置 WaitingUnderlay
+ * stop()       → 置停止标志、等待任务确认退出（可超时）
+ * deinit()     → 释放队列与密钥
  * @endcode
- * 首版只允许一个已初始化实例，避免两个实例同时占用虚拟网卡与路由归属。
+ * 组件只支持一个实例（内部状态是本文件的静态数据），且没有析构函数，
+ * 因此应用必须显式调用 stop() 与 deinit() 收尾。
  */
 #include <algorithm>
-#include <cstdio>
 #include <atomic>
+#include <cstdio>
 #include <cstring>
 #include <new>
 
 #include "context.hpp"
-#include "config/file.hpp"
-#include "config/toml.hpp"
+#include "config/config.hpp"
 #include "crypto/kdf.hpp"
 #include "support/config_limits.hpp"
 #include "support/log.hpp"
@@ -41,13 +41,14 @@ constexpr const char* kTag = "ET.INSTANCE";
 constexpr UBaseType_t kFrameQueueDepth = 4;
 // 单个实例的常驻内存必须保持有界：Context 在堆上分配（大于 16 KiB 的分配会走
 // PSRAM），但仍要有上限，避免后续加入功能时悄悄膨胀。实测组成（ESP32-S3，字节）：
-//   Context 合计 93768
+//   Context 合计 97560
 //     ├─ RpcReassembler（2 槽 × (8 KiB 收包 + 8 KiB 有序缓冲)）33184
 //     ├─ SyncEngine（Topology 22928 + 2 个 ConnList 8968 + 快照 656 + 编码缓冲）约 33000
 //     ├─ RPC 收发缓冲（body 8 KiB + service 4 KiB + 其它）约 14000
+//     ├─ Config 副本（含约 4.4 KiB 的 ConfigReport）
 //     └─ 其它（AEAD 指针、原子量、dhcp/网卡状态等）
-// 入口地址列表不再占用 Context 常驻内存：它按配置实际条数单独在堆上分配，因此配置里
-// 写多少入口都不会让 Context 膨胀。
+// 入口地址列表与实例名/主机名/网络名/网络密钥都按实际长度单独在堆上分配，因此这些文本
+// 写多长都不会让 Context 膨胀（Config 里只留 TextBuffer 的三元组指针）。
 // 另外每个实例还有：帧队列 4×2008×3 ≈ 24 KiB、每个连接槽一个 TcpConn 约 12 KiB（堆，
 // 数量见 Kconfig `EASYTIER_ESP_MAX_CONNECTED_PEERS`，默认 6）、
 // 三个任务栈 6+10+8 = 24 KiB。因此**强烈建议启用 PSRAM**（示例 sdkconfig 已启用，
@@ -71,14 +72,33 @@ constexpr uint32_t kDataTaskStack = 8192;
 /** @brief 数据面任务优先级（与 I/O 任务同级，低于 WiFi/TCPIP）。 */
 constexpr UBaseType_t kDataTaskPriority = 7;
 
-/** @brief 全局单实例标记。 */
-std::atomic<bool> g_instance_in_use{false};
+/**
+ * @brief 全局单实例状态。
+ * @note 只支持一个实例，所以直接是文件级静态数据，不需要"已被占用"的标记。
+ */
+struct Impl {
+    Context ctx{};            ///< 运行上下文
+    bool started = false;     ///< 是否已 start()
+    bool resources = false;   ///< 队列是否已创建
+};
 
-/** @brief 把校验后的配置（含入口列表所有权）与运行选项移入上下文。 */
-void prepare_context(Context& ctx, StoredConfig&& config,
+Impl* g_impl = nullptr;
+
+/** @brief 把文本视图拷进定长诊断缓冲（截断但保证 NUL 结尾）。 */
+template <size_t N>
+void copy_text(std::array<char, N>& dst, std::string_view src) noexcept {
+    const size_t n = src.size() < N - 1 ? src.size() : N - 1;
+    for (size_t i = 0; i < n; ++i) {
+        dst[i] = src[i];
+    }
+    dst[n] = '\0';
+}
+
+/** @brief 把生效配置与运行选项拷入上下文。 */
+void prepare_context(Context& ctx, const Config& config,
                      const RuntimeOptions& options) noexcept {
-    ctx.config = std::move(config);
-    finalize_config_identity(ctx.config);
+    // 配置在构造/init 时已经补齐身份，这里只做拷贝与密钥派生。
+    ctx.config = config;
     ctx.options = options;
     ctx.key = derive_key_128(ctx.config.network_secret_view());
     ctx.digest = secret_digest(ctx.config.network_name_view(), ctx.config.network_secret_view());
@@ -193,17 +213,8 @@ esp_err_t start_runtime(Context& ctx) noexcept {
     return ESP_OK;
 }
 
-/** @brief 等待两个任务确认退出。 */
+/** @brief 等待三个任务确认退出。 */
 bool wait_tasks(Context& ctx, uint32_t timeout_ms) noexcept {
-    if (timeout_ms == UINT32_MAX) {
-        // 析构路径：无限等待，绝不释放仍被任务访问的资源。
-        for (size_t i = 0; i < kTaskCount; ++i) {
-            if (xSemaphoreTake(ctx.task_exit, portMAX_DELAY) != pdTRUE) {
-                return false;
-            }
-        }
-        return true;
-    }
     const TickType_t total = pdMS_TO_TICKS(timeout_ms);
     const TickType_t start = xTaskGetTickCount();
     for (size_t i = 0; i < kTaskCount; ++i) {
@@ -216,7 +227,6 @@ bool wait_tasks(Context& ctx, uint32_t timeout_ms) noexcept {
     return true;
 }
 
-/** @brief 删除队列与信号量。 */
 /**
  * @brief 释放运行期资源。
  * @details **顺序很重要**：必须先注销虚拟网卡再删除队列。网卡的 output 回调会把
@@ -279,135 +289,53 @@ void destroy_queues(Context& ctx) noexcept {
 
 }  // namespace
 
-/** @brief 私有实现：上下文 + 运行标记。 */
-struct Instance::Impl {
-    Context ctx{};            ///< 运行上下文
-    bool started = false;     ///< 是否已 start()
-    bool resources = false;   ///< 队列是否已创建
-};
+namespace Inst {
 
-Instance::Instance() noexcept = default;
-
-Instance::~Instance() noexcept {
-    if (impl_ == nullptr) {
-        return;
+esp_err_t init(const Config& config, const RuntimeOptions& options) noexcept {
+    if (g_impl != nullptr) {
+        return ESP_ERR_INVALID_STATE;  // 必须先 deinit()
     }
-#if defined(ESP_PLATFORM)
-    if (impl_->started) {
-        // 析构没有超时：必须等到任务确认退出后才能释放内存。
-        (void)stop(UINT32_MAX);
+    // 配置自身的解析错误优先返回，避免把一份解析失败的配置带进运行期。
+    if (config.last_error() != ESP_OK) {
+        ET_LOGE(kTag, "config carries a parse error: 0x%x", config.last_error());
+        return config.last_error();
     }
-#endif
-    (void)deinit();
-}
-
-/**
- * @brief 公共初始化路径。
- * @details 依次：单实例检查 → 运行选项检查 → 上下文准备 → 分配 Impl。
- */
-esp_err_t Instance::init(const Config& config, const RuntimeOptions& options) noexcept {
-    // StoredConfig（约 3.5 KiB）与 ConfigReport（约 4.5 KiB）放在静态区：
-    // 公共 init 路径可能被 2~4 KiB 栈的事件任务调用（例如 WiFi 拿到 IP 的回调），
-    // 把这两个对象放在栈上会直接压垮调用方。整块缓冲复用是安全的——组件本身是
-    // 单实例设计（见 g_instance_in_use），且初始化只发生一次。
-    static StoredConfig stored;
-    static ConfigReport report;
-    // stored_config_from_config() 内部会先复位为默认值，这里无需重复复位。
-    const esp_err_t err = stored_config_from_config(config, stored, &report);
+    const esp_err_t err = validate_config(config);
     if (err != ESP_OK) {
         return err;
     }
-    return init_from_internal(&stored, options);
-}
-
-esp_err_t Instance::init_from_toml(std::string_view text, const RuntimeOptions& options,
-                                  ConfigReport* report) noexcept {
-    // 同上：解析缓冲放在静态区，保证调用方无论栈多大都安全。
-    // parse_toml_config() 内部会先复位为默认值，这里无需重复复位。
-    static StoredConfig stored;
-    const esp_err_t err = parse_toml_config(text, stored, report);
-    if (err != ESP_OK) {
-        return err;
-    }
-    return init_from_internal(&stored, options);
-}
-
-esp_err_t Instance::init_from_file(std::string_view path, const RuntimeOptions& options,
-                                   ConfigReport* report) noexcept {
-    clear_config_report(report);
-    if (impl_ != nullptr) {
-        return ESP_ERR_INVALID_STATE;
-    }
-#if defined(ESP_PLATFORM)
-    // 配置文件最大 16 KiB，按上限读取到栈外的静态缓冲，避免占用调用方栈。
-    static std::array<char, kTomlMaxBytes> file_buffer;
-    size_t len = 0;
-    const esp_err_t io_err = read_config_file(path, file_buffer, len);
-    if (io_err != ESP_OK) {
-        if (report != nullptr && report->count < kMaxDiagnostics) {
-            ConfigDiagnostic& d = report->items[report->count++];
-            d.issue = ConfigIssue::IoError;
-            (void)set_fixed_string(d.key, "config_file");
-        }
-        return io_err;
-    }
-    return init_from_toml(std::string_view(file_buffer.data(), len), options, report);
-#else
-    (void)path;
-    return ESP_ERR_NOT_SUPPORTED;
-#endif
-}
-
-/** @brief 由校验后的配置完成初始化（三个 init* 入口共用）。 */
-esp_err_t Instance::init_from_internal(void* stored_config,
-                                       const RuntimeOptions& options) noexcept {
-    if (stored_config == nullptr) {
-        return ESP_ERR_INVALID_ARG;
-    }
-    // 入口列表的所有权在这里移交给 Context，因此 stored 是可变引用。
-    auto& stored = *static_cast<StoredConfig*>(stored_config);
-    if (impl_ != nullptr) {
-        return ESP_ERR_INVALID_STATE;
-    }
-    bool expected = false;
-    if (!g_instance_in_use.compare_exchange_strong(expected, true)) {
-        ET_LOGE(kTag, "another instance is already initialized");
-        return ESP_ERR_INVALID_STATE;
-    }
-    // Impl 内含 Context（当前约 99 KiB：RPC 重组缓冲、拓扑、邻接表、快照等）。
+    // Impl 内含 Context（约 94 KiB：RPC 重组缓冲、拓扑、邻接表、快照、配置副本等）。
     // 未启用 PSRAM 时可能分配失败，这里给出明确提示而不是只返回 0x101。
     Impl* impl = new (std::nothrow) Impl();
     if (impl == nullptr) {
-        // 最可能的原因：未启用 PSRAM 时内部 RAM 不足以容纳约 99 KiB 的 Context。
         ET_LOGE(kTag, "context allocation failed (%u bytes); enable PSRAM or shrink buffers",
                 static_cast<unsigned>(sizeof(Impl)));
-        g_instance_in_use.store(false);
         return ESP_ERR_NO_MEM;
     }
-    prepare_context(impl->ctx, std::move(stored), options);
+    prepare_context(impl->ctx, config, options);
     impl->ctx.state.store(State::Stopped);
-    impl_ = impl;
+    g_impl = impl;
     return ESP_OK;
 }
 
-esp_err_t Instance::start() noexcept {
-    if (impl_ == nullptr) {
+esp_err_t start() noexcept {
+    if (g_impl == nullptr) {
         return ESP_ERR_INVALID_STATE;
     }
 #if defined(ESP_PLATFORM)
-    if (impl_->started) {
+    if (g_impl->started) {
         return ESP_ERR_INVALID_STATE;
     }
-    const esp_err_t err = start_runtime(impl_->ctx);
+    const esp_err_t err = start_runtime(g_impl->ctx);
     if (err != ESP_OK) {
-        destroy_queues(impl_->ctx);
-        impl_->resources = false;
-        impl_->ctx.set_error(err);
-        impl_->ctx.state.store(State::Error);
+        destroy_queues(g_impl->ctx);
+        g_impl->resources = false;
+        g_impl->ctx.set_error(err);
+        g_impl->ctx.state.store(State::Error);
         return err;
     }
-    impl_->resources = true;
-    impl_->started = true;
+    g_impl->resources = true;
+    g_impl->started = true;
     // Started 事件由控制面任务在进入主循环时上报，保证回调上下文一致。
     return ESP_OK;
 #else
@@ -415,18 +343,18 @@ esp_err_t Instance::start() noexcept {
 #endif
 }
 
-esp_err_t Instance::set_underlay_ready(bool ready) noexcept {
-    if (impl_ == nullptr) {
+esp_err_t set_underlay_ready(bool ready) noexcept {
+    if (g_impl == nullptr) {
         return ESP_ERR_INVALID_STATE;
     }
 #if defined(ESP_PLATFORM)
-    if (!impl_->started) {
+    if (!g_impl->started) {
         return ESP_ERR_INVALID_STATE;
     }
     SmallMessage msg{};
     msg.kind = static_cast<uint8_t>(ready ? AppCommand::UnderlayUp : AppCommand::UnderlayDown);
     // 非阻塞：队列满时返回错误，由调用方重试，绝不静默丢弃物理网络状态。
-    if (xQueueSend(impl_->ctx.q_app_cmd, &msg, 0) != pdTRUE) {
+    if (xQueueSend(g_impl->ctx.q_app_cmd, &msg, 0) != pdTRUE) {
         return ESP_ERR_NO_MEM;
     }
     return ESP_OK;
@@ -436,11 +364,11 @@ esp_err_t Instance::set_underlay_ready(bool ready) noexcept {
 #endif
 }
 
-esp_err_t Instance::get_status(Status& out) const noexcept {
-    if (impl_ == nullptr) {
+esp_err_t get_status(Status& out) noexcept {
+    if (g_impl == nullptr) {
         return ESP_ERR_INVALID_STATE;
     }
-    const Context& ctx = impl_->ctx;
+    const Context& ctx = g_impl->ctx;
     out.state = ctx.state.load();
     out.peer_id = ctx.my_peer_id.load();
     out.virtual_ipv4 = ctx.my_ipv4.load();
@@ -454,21 +382,18 @@ esp_err_t Instance::get_status(Status& out) const noexcept {
 
 /**
  * @brief 取回当前生效配置的诊断快照。
- * @details 数据来源是组件内部已校验的 StoredConfig（即真正生效的配置），
+ * @details 数据来源是运行期持有的 @ref Config 副本（即真正生效的配置），
  *          因此可以据此确认 TOML 的映射结果。
  */
-esp_err_t Instance::get_config_info(ConfigInfo& out) const noexcept {
-    if (impl_ == nullptr) {
+esp_err_t get_config_info(ConfigInfo& out) noexcept {
+    if (g_impl == nullptr) {
         return ESP_ERR_INVALID_STATE;
     }
-    const StoredConfig& cfg = impl_->ctx.config;
+    const Config& cfg = g_impl->ctx.config;
     out = ConfigInfo{};
-    std::memcpy(out.instance_name.data(), cfg.instance_name.data(),
-                std::min(out.instance_name.size() - 1, cfg.instance_name.size()));
-    std::memcpy(out.hostname.data(), cfg.hostname.data(),
-                std::min(out.hostname.size() - 1, cfg.hostname.size()));
-    std::memcpy(out.network_name.data(), cfg.network_name.data(),
-                std::min(out.network_name.size() - 1, cfg.network_name.size()));
+    copy_text(out.instance_name, cfg.instance_name.view());
+    copy_text(out.hostname, cfg.hostname.view());
+    copy_text(out.network_name, cfg.network_name.view());
     format_uuid_text(cfg.instance_id.data(), out.instance_id.data());
     out.peer_total_count = cfg.peers.size();
     out.peer_count = cfg.peers.size() > out.peers.size() ? out.peers.size() : cfg.peers.size();
@@ -476,7 +401,7 @@ esp_err_t Instance::get_config_info(ConfigInfo& out) const noexcept {
     for (size_t i = 0; i < out.peer_count; ++i) {
         // 主机名最长 255 字节而缓冲 200：用精度限长，避免编译期截断告警。
         (void)snprintf(out.peers[i].text.data(), out.peers[i].text.size(), "%.180s:%u",
-                       cfg.peers[i].host.data(), static_cast<unsigned>(cfg.peers[i].port));
+                       cfg.peers[i].host.c_str(), static_cast<unsigned>(cfg.peers[i].port));
     }
     out.has_static_ipv4 = cfg.has_static_ipv4;
     out.static_ipv4 = cfg.static_ipv4;
@@ -497,30 +422,30 @@ esp_err_t Instance::get_config_info(ConfigInfo& out) const noexcept {
     return ESP_OK;
 }
 
-esp_err_t Instance::stop(uint32_t timeout_ms) noexcept {
-    if (impl_ == nullptr) {
+esp_err_t stop(uint32_t timeout_ms) noexcept {
+    if (g_impl == nullptr) {
         return ESP_ERR_INVALID_STATE;
     }
 #if defined(ESP_PLATFORM)
-    if (!impl_->started) {
+    if (!g_impl->started) {
         return ESP_OK;  // 幂等
     }
-    impl_->ctx.state.store(State::Stopping);
-    impl_->ctx.underlay_ready.store(false);
-    impl_->ctx.stop_requested.store(true);
+    g_impl->ctx.state.store(State::Stopping);
+    g_impl->ctx.underlay_ready.store(false);
+    g_impl->ctx.stop_requested.store(true);
 
-    if (!wait_tasks(impl_->ctx, timeout_ms)) {
+    if (!wait_tasks(g_impl->ctx, timeout_ms)) {
         // 任务尚未退出：保留全部资源，允许再次 stop()。
         return ESP_ERR_TIMEOUT;
     }
-    impl_->started = false;
-    if (impl_->ctx.netif_created) {
-        (void)impl_->ctx.virtual_netif.set_link(false);
+    g_impl->started = false;
+    if (g_impl->ctx.netif_created) {
+        (void)g_impl->ctx.virtual_netif.set_link(false);
     }
-    impl_->ctx.state.store(State::Stopped);
-    impl_->ctx.io_task_handle = nullptr;
-    impl_->ctx.proto_task_handle = nullptr;
-    impl_->ctx.data_task_handle = nullptr;
+    g_impl->ctx.state.store(State::Stopped);
+    g_impl->ctx.io_task_handle = nullptr;
+    g_impl->ctx.proto_task_handle = nullptr;
+    g_impl->ctx.data_task_handle = nullptr;
     return ESP_OK;
 #else
     (void)timeout_ms;
@@ -528,24 +453,25 @@ esp_err_t Instance::stop(uint32_t timeout_ms) noexcept {
 #endif
 }
 
-esp_err_t Instance::deinit() noexcept {
-    if (impl_ == nullptr) {
+esp_err_t deinit() noexcept {
+    if (g_impl == nullptr) {
         return ESP_ERR_INVALID_STATE;
     }
 #if defined(ESP_PLATFORM)
-    if (impl_->started) {
+    if (g_impl->started) {
         return ESP_ERR_INVALID_STATE;  // 必须先 stop()
     }
-    destroy_queues(impl_->ctx);
+    destroy_queues(g_impl->ctx);
 #endif
     // 清除密钥与网络密钥，避免残留在堆中。
-    impl_->ctx.key.fill(0);
-    impl_->ctx.digest.fill(0);
-    impl_->ctx.config.network_secret.fill(0);
-    delete impl_;
-    impl_ = nullptr;
-    g_instance_in_use.store(false);
+    g_impl->ctx.key.fill(0);
+    g_impl->ctx.digest.fill(0);
+    g_impl->ctx.config.network_secret.zeroize();
+    delete g_impl;
+    g_impl = nullptr;
     return ESP_OK;
 }
+
+}  // namespace Inst
 
 }  // namespace et

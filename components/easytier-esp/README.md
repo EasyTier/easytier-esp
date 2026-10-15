@@ -18,7 +18,8 @@
 
 已实现（有宿主测试与 ESP-IDF 构建证据）：
 
-- 与上游核心相同格式的 TOML 配置（文本与已挂载 VFS 文件两种入口），不兼容参数忽略并报告；
+- 与上游核心相同格式的 TOML 配置（`et::Config` 只接受 TOML 文本，应用自行读文件），
+  不兼容参数忽略并报告；
 - SipHash-1-3 密钥派生、AES-128-GCM（PSA Crypto）、PeerManagerHeader/分帧等线格式；
 - 有界 protobuf 编解码（含未知字段跳过、packed repeated、负整数、optional 存在性）；
 - 非阻塞 TCP 传输：非阻塞连接、按帧重组（拆包/粘包）、部分写游标与背压、代际隔离；
@@ -28,8 +29,10 @@
 - 路由同步：`RoutePeerInfo`/邻接表/邻接位图（LSB-first）编解码与上游逐字节一致，
   双向主动同步、版本合并、missing 补发、90 秒退出建图 / 3600 秒删除、
   有向图 Dijkstra（avoid_relay 惩罚）与下一跳/IP 路由快照，可达后上报 `NetworkReady`；
-- 三个任务中的两个（I/O、控制面）、队列与有界资源、`Instance` 完整生命周期
+- 三个任务、队列与有界资源、全局单实例 `et::Inst` 的完整生命周期
   （init/start/set_underlay_ready/get_status/stop/deinit）；
+- `et::Config` 配置类：TOML 文本构造/增量 `init`、拷贝、身份补齐
+  （hostname→instance_name、随机 UUID v4）、解析错误与诊断由对象自己持有；
 - `SyncEngine`：路由同步的全部纯逻辑（拓扑合并、最短路、dhcp、请求/响应编解码）
   与任务解耦，因此**可以在宿主测试里让多个引擎互相对话**，验证两节点互通与
   A—B—C 经中继收敛；
@@ -101,15 +104,22 @@ disable_p2p = true
 入口**数量**不设上限（只受 TOML 文本长度与解析预算约束）；**同时连接**的数量由
 Kconfig 的 `EASYTIER_ESP_MAX_CONNECTED_PEERS` 决定（默认 6），其余入口作为轮换备用。
 
-TOML 语法错误、peer 配置错误或解析长度/深度/内存预算耗尽会返回错误；VFS 读取失败另报
-读取错误。空文档、无关字段、缺少入口或虚拟地址都可以加载；加载成功不代表组网成功。
-编程式 `init(Config)` 入口仍保留严格字段校验。
+文本字段（实例名 / 主机名 / 网络名 / 网络密钥 / 入口主机）同样**没有固定长度上限**：
+它们按实际长度在堆上分配（`et::TextBuffer`），约束只有 TOML 文本长度与解析预算。
+唯一保留的上游规则是 hostname 规范化后最多 32 个 Unicode 码点。
+
+注意 `et::Inst::get_config_info()` 返回的**诊断快照**仍是定长缓冲（实例名/主机名/网络名
+各 64 字节、入口文本 200 字节），超长取值在快照里会被截断——它只用于日志，不影响生效配置。
+
+TOML 语法错误、peer 配置错误或解析长度/深度/内存预算耗尽会让 `Config::init` 返回错误
+（并记录在 `Config::last_error()`）。空文档、无关字段、缺少入口或虚拟地址都可以加载；
+加载成功不代表组网成功——入口与虚拟地址的结构校验在 `et::Inst::init()` 里执行。
 
 字段名、层级、默认网络身份、IPv4 /32→/24、DHCP 布尔/CIDR 形式参考上游
 `easytier-core/src/config/toml.rs`。ESP 端按需求对字段转换采用更宽容的策略，
 不会套用上游所有结构体的强类型反序列化约束。
 
-忽略项通过 `et::ConfigReport` 返回（只记录字段路径，不含任何密钥取值）。
+忽略项通过 `Config::report()`（`et::ConfigReport`）返回（只记录字段路径，不含任何密钥取值）。
 
 `dhcp` 接受布尔或 IPv4 CIDR 字符串（前缀 0..=30）；配置了静态 `ipv4` 时 `dhcp` 被忽略。
 
@@ -120,9 +130,9 @@ TOML 语法错误、peer 配置错误或解析长度/深度/内存预算耗尽�
 
 | 字段 | 未传入时 | 依据 |
 | --- | --- | --- |
-| `instance_name` | `default` | 上游 `toml.rs` 的 `default_instance_name()` / `get_inst_name()` |
-| `instance_id` | 初始化时生成并缓存随机 UUID v4 | 上游 `toml.rs::get_id()`；显式 UUID（含 nil UUID）保持原值 |
-| `hostname` | `Espressif` | 上游优先使用非空配置 hostname，否则取 Host fallback；ESP fallback 按用户要求设为此值 |
+| `instance_name` | 取 `hostname`（按用户要求：未显式配置时优先用 hostname） | 显式配置的 `instance_name` 优先 |
+| `instance_id` | 创建/导入 `Config` 时生成并缓存随机 UUID v4 | 上游 `toml.rs::get_id()`；显式 UUID（含 nil UUID）保持原值 |
+| `hostname` | `Espressif` | 创建/导入 `Config` 时即补齐；上游优先使用非空配置 hostname，否则取 Host fallback，ESP fallback 按用户要求设为此值 |
 | `network_identity.network_name` | `default` | 上游 `NetworkIdentity::default()` |
 | `network_identity.network_secret` | 空字符串 | 上游普通模式身份归一化；不是随机密钥 |
 | `ipv4` | 不设置静态地址 | 上游 `get_ipv4()` 缺省 `None`；裸地址或 /32 归一化为 /24 |
@@ -152,11 +162,15 @@ DHCP 网卡创建/改址成功后同步更新公开 IPv4/前缀，再发送 Netw
 
 ## 用法
 
+组件只支持**一个全局实例**，因此没有实例类：配置是 `et::Config`，运行期接口是
+`et::Inst` 下的自由函数。组件也**不再接收文件路径**——应用自己读取文件（或像示例那样
+用 `EMBED_TXTFILES` 内嵌），再把 TOML 文本交给 `Config`。
+
 ```cpp
 #include "easytier-esp.h"
 
-static et::Instance instance;
-static et::ConfigReport report;
+// Config 约 4.4 KiB（含诊断报告），放静态区避免占用小栈任务。
+static et::Config config;
 
 extern const uint8_t easytier_toml_start[] asm("_binary_easytier_toml_start");
 extern const uint8_t easytier_toml_end[] asm("_binary_easytier_toml_end");
@@ -164,22 +178,44 @@ extern const uint8_t easytier_toml_end[] asm("_binary_easytier_toml_end");
 void start_easytier() {
     auto len = static_cast<size_t>(easytier_toml_end - easytier_toml_start);
     if (len != 0 && easytier_toml_start[len - 1] == 0) --len; // 排除 EMBED_TXTFILES 终止符
-    ESP_ERROR_CHECK(instance.init_from_toml(
-        std::string_view(reinterpret_cast<const char*>(easytier_toml_start), len), {}, &report));
-    ESP_ERROR_CHECK(instance.start());
+
+    // 也可以用构造函数： et::Config config(std::string_view(toml, len));
+    const esp_err_t parse_err = config.init(
+        std::string_view(reinterpret_cast<const char*>(easytier_toml_start), len));
+    if (parse_err != ESP_OK) { /* 看 config.report() 里的字段路径 */ return; }
+    // 被忽略但不影响使用的配置项，用 config.report() 列出。
+
+    et::RuntimeOptions options{};
+    options.on_event = &on_easytier_event;
+    ESP_ERROR_CHECK(et::Inst::init(config, options));
+    ESP_ERROR_CHECK(et::Inst::start());
     // 物理网络取得 IP 后通知组件；断网时传 false。
-    ESP_ERROR_CHECK(instance.set_underlay_ready(true));
+    ESP_ERROR_CHECK(et::Inst::set_underlay_ready(true));
 }
 ```
 
-已挂载文件系统时改用 `instance.init_from_file("/spiffs/easytier.toml", {}, &report)`。
+已挂载文件系统时由应用自行读取，例如 `fopen`/`fread` 成缓冲区后调用 `config.init(text)`。
+
+### 配置对象的语义
+
+- `et::Config()` 构造缺省配置，并**立即补齐实例身份**：`hostname` 缺省为 `Espressif`，
+  `instance_name` 缺省取 `hostname`，`instance_id` 缺省生成随机 UUID v4。
+- `et::Config(std::string_view toml)` 等价于"缺省构造 + `init(toml)`"。
+- `Config::init(toml)` 是**全量替换**（不是增量更新）：先复位为缺省值，再按 TOML 逐字段
+  覆盖，最后重新补齐身份。因此**随机生成的缺省值也会重新生成**——TOML 里没写
+  `instance_id` 时，每次 `init` 都会得到一个新的 UUID v4；`hostname` 回退 `Espressif`，
+  `instance_name` 重新按 hostname 推导。上一次配置的残留不会影响本次结果。
+  TOML 里显式给出的 `instance_name` / `instance_id` 仍然优先。
+- 只支持 TOML 配置，**没有编程式 setter**；要改配置就重新准备一份 TOML 文本再 `init`。
+- 解析错误与诊断保存在对象内：`last_error()` 与 `report()`；构造函数无法返回错误码，
+  所以用 `Config(toml)` 时必须检查 `last_error()`。
 
 生命周期约定：
 
-- `Instance` 不可复制、不可移动；首版只允许一个已初始化实例。
-- `init*()` 会复制所有配置视图，返回后调用方可以释放这些视图指向的对象。
-- 事件回调在控制面任务中执行，必须快速返回，且不得调用 `stop()/deinit()` 或销毁实例。
-- 析构会请求停止并等待任务退出（没有超时），建议应用显式 `stop()` 以便观察超时。
+- 全局单实例：`et::Inst::init()` 之前必须先 `et::Inst::deinit()`（同一时刻只能初始化一次）。
+- `et::Inst::init(config)` 会深拷贝配置（含入口列表）；之后应用可以复用/释放自己的 `Config`。
+- **没有析构函数收尾**：应用必须显式调用 `et::Inst::stop()` 与 `et::Inst::deinit()`。
+- 事件回调在控制面任务中执行，必须快速返回，且不得调用 `stop()/deinit()`。
 
 ## 资源上限
 
@@ -195,19 +231,21 @@ void start_easytier() {
 
 | 接口 | 可从任意任务 | 可在事件回调中 | 说明 |
 | --- | --- | --- | --- |
-| `get_status` / `get_config_info` | 是 | 是 | 只读原子量与不可变配置，返回副本 |
-| `set_underlay_ready` | 是 | 是 | 非阻塞（队列投递），物理网络事件里直接调用 |
-| `init*` | 仅初始化阶段 | 否 | 全组件只允许一个实例 |
-| `start` / `stop` / `deinit` | 同一任务串行 | **否** | 会等待组件任务退出 |
-| 析构 | 否 | **否** | 无限等待任务退出 |
+| `et::Config::init` | 是 | 否 | 只操作自己的对象，与运行期实例无关 |
+| `et::Inst::get_status` / `get_config_info` | 是 | 是 | 只读原子量与不可变配置，返回副本 |
+| `et::Inst::set_underlay_ready` | 是 | 是 | 非阻塞（队列投递），物理网络事件里直接调用 |
+| `et::Inst::init` | 仅初始化阶段 | 否 | 全局只允许一个实例，必须先 `deinit` |
+| `et::Inst::start` / `stop` / `deinit` | 同一任务串行 | **否** | 会等待组件任务退出 |
 
-- 生命周期接口必须**串行**调用；不要在其它任务正在 stop/deinit 时销毁实例。
+- 生命周期接口必须**串行**调用。
 - 事件回调运行在**控制面任务（`et_proto`）**里且是同步回调，因此必须快速返回；在回调里
-  调用 `stop()` 会等待该任务自身、最终以 `ESP_ERR_TIMEOUT` 返回，带无限超时的析构则会
-  **永久阻塞**。`get_status()`/`get_config_info()`/`set_underlay_ready()` 在回调里可安全调用。
+  调用 `stop()` 会等待该任务自身、最终以 `ESP_ERR_TIMEOUT` 返回。
+  `get_status()`/`get_config_info()`/`set_underlay_ready()` 在回调里可安全调用。
 - `stop()` 返回后任务已全部退出、不会再有任何回调，此时才可以释放 `user_data` 指向的对象。
+- **没有析构函数**：应用必须在退出前显式调用 `et::Inst::stop()` 与 `et::Inst::deinit()`。
 - 示例应用遵循同样的约束：WiFi 事件里只调用非阻塞的 `set_underlay_ready()`，而把
-  `init_from_toml()` + `start()` 放在独立的 8 KiB 任务里执行（见 [`main/main.cpp`](../../main/main.cpp)）。
+  `config.init()` + `et::Inst::init()` + `start()` 放在独立的 8 KiB 任务里执行
+  （见 [`main/main.cpp`](../../main/main.cpp)）。
 
 ## Kconfig 可调项
 
@@ -227,8 +265,9 @@ void start_easytier() {
 
 | 项目 | 大小 | 说明 |
 | --- | --- | --- |
-| `Context`（堆） | 93,768 B | RPC 重组 33,184（2 槽 × 16 KiB）+ `SyncEngine` 约 33,000（拓扑 22,928 + 邻接表 8,968 + 快照与编码缓冲）+ RPC 收发缓冲约 14,000 + 其它 |
-| 入口地址列表（堆） | 每条约 260 B | 按配置实际条数分配，不占用 `Context`；条目数量无上限 |
+| `Context`（堆） | 97,560 B | RPC 重组 33,184（2 槽 × 16 KiB）+ `SyncEngine` 约 33,000（拓扑 22,928 + 邻接表 8,968 + 快照与编码缓冲）+ RPC 收发缓冲约 14,000 + `Config` 副本（含约 4.4 KiB 诊断报告）+ 其它 |
+| `Config` 文本字段（堆） | 按实际长度 | 实例名 / 主机名 / 网络名 / 网络密钥都按需分配，**长度无固定上限**；`Config` 里只占 `TextBuffer` 的 3 个机器字 |
+| 入口地址列表（堆） | 每条约 32 B + 主机文本 | 按配置实际条数分配；条目数量无上限 |
 | 帧队列 | 约 24 KiB | 控制面 / 数据面 / 发送队列各 4 × 2008 B |
 | `TcpConn`（堆） | 约 12 KiB × 连接数 | 每槽一份收发缓冲，槽数见 `EASYTIER_ESP_MAX_CONNECTED_PEERS`（默认 6） |
 | 任务栈 | 24 KiB | I/O 6 KiB + 控制面 10 KiB + 数据面 8 KiB |
@@ -269,7 +308,7 @@ python3 tools/check_stack_usage.py
 完整步骤见 **[docs/硬件联调指南.md](../../docs/硬件联调指南.md)**（静态检查 → 设备自检 →
 Linux 入口节点 → 期望日志逐条对照 → 直连/中继验证 → 排错表）。
 
-示例在启动时会打印**实际生效的配置**（`Instance::get_config_info()`），并每 10 秒打印一行
+示例在启动时会打印**实际生效的配置**（`et::Inst::get_config_info()`），并每 10 秒打印一行
 状态摘要，便于和入口节点日志对照：
 
 ```
