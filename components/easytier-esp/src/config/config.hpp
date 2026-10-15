@@ -3,13 +3,15 @@
  * @brief 校验后的、拥有所有权的配置。
  *
  * @details 编程式入口与 TOML 入口最终都汇聚到本结构，避免两套语义漂移。
- * 所有存储都是定长数组，这里不进行任何动态分配。
+ *          除入口地址列表外全部为定长数组；入口列表按**实际条数**在堆上分配，
+ *          因此配置里写多少个入口都不再有固定上限（只受 TOML 文本与解析预算约束）。
  */
 #pragma once
 
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <new>
 #include <string_view>
 
 #include "easytier-esp.h"
@@ -44,6 +46,90 @@ struct PeerEndpoint {
 };
 
 /**
+ * @brief 入口地址列表：按实际条数在堆上分配，因此配置里的入口数量没有固定上限。
+ *
+ * @details 只支持移动、不支持拷贝（避免隐式的大块拷贝与重复分配）。分配失败通过
+ *          返回值报告而不是异常——组件以 @c -fno-exceptions 编译。容量只增不减，
+ *          重复使用同一个解析缓冲时不会反复分配。
+ */
+class PeerEndpointList {
+public:
+    PeerEndpointList() noexcept = default;
+    ~PeerEndpointList() noexcept { release(); }
+
+    PeerEndpointList(const PeerEndpointList&) = delete;
+    PeerEndpointList& operator=(const PeerEndpointList&) = delete;
+    PeerEndpointList(PeerEndpointList&& other) noexcept { move_from(other); }
+    PeerEndpointList& operator=(PeerEndpointList&& other) noexcept {
+        if (this != &other) {
+            release();
+            move_from(other);
+        }
+        return *this;
+    }
+
+    /** @brief 预留至少 @p n 条容量（只增长，不改变 size）。 */
+    [[nodiscard]] esp_err_t reserve(size_t n) noexcept {
+        if (n <= capacity_) {
+            return ESP_OK;
+        }
+        PeerEndpoint* fresh = new (std::nothrow) PeerEndpoint[n];
+        if (fresh == nullptr) {
+            return ESP_ERR_NO_MEM;
+        }
+        for (size_t i = 0; i < size_; ++i) {
+            fresh[i] = items_[i];
+        }
+        delete[] items_;
+        items_ = fresh;
+        capacity_ = n;
+        return ESP_OK;
+    }
+
+    /** @brief 追加一条；调用方需先保证容量足够（见 @ref full ）。 */
+    void push_back(const PeerEndpoint& value) noexcept {
+        if (size_ < capacity_) {
+            items_[size_++] = value;
+        }
+    }
+
+    /** @brief 是否已达预留容量。 */
+    [[nodiscard]] bool full() const noexcept { return size_ >= capacity_; }
+    /** @brief 清空内容（保留已分配的容量）。 */
+    void clear() noexcept { size_ = 0; }
+    /** @brief 当前条数。 */
+    [[nodiscard]] size_t size() const noexcept { return size_; }
+    /** @brief 首元素指针（可能为 nullptr）。 */
+    [[nodiscard]] const PeerEndpoint* data() const noexcept { return items_; }
+    /** @brief 首元素指针（可能为 nullptr）。 */
+    [[nodiscard]] PeerEndpoint* data() noexcept { return items_; }
+    /** @brief 下标访问（不做越界检查，调用方保证 i < size()）。 */
+    [[nodiscard]] const PeerEndpoint& operator[](size_t i) const noexcept { return items_[i]; }
+    /** @brief 下标访问（不做越界检查，调用方保证 i < size()）。 */
+    [[nodiscard]] PeerEndpoint& operator[](size_t i) noexcept { return items_[i]; }
+
+private:
+    void release() noexcept {
+        delete[] items_;
+        items_ = nullptr;
+        size_ = 0;
+        capacity_ = 0;
+    }
+    void move_from(PeerEndpointList& other) noexcept {
+        items_ = other.items_;
+        size_ = other.size_;
+        capacity_ = other.capacity_;
+        other.items_ = nullptr;
+        other.size_ = 0;
+        other.capacity_ = 0;
+    }
+
+    PeerEndpoint* items_ = nullptr;  ///< 堆缓冲
+    size_t size_ = 0;                ///< 有效条数
+    size_t capacity_ = 0;            ///< 已分配容量
+};
+
+/**
  * @brief 校验后的配置实体。
  *
  * @note IPv4 地址以"四段字节按大端组成的数值"保存（例如 10.144.144.10 =
@@ -59,8 +145,7 @@ struct StoredConfig {
     std::array<char, kMaxNetworkNameBytes + 1> network_name{};      ///< 网络名
     std::array<char, kMaxNetworkSecretBytes + 1> network_secret{};  ///< 网络密钥
 
-    std::array<PeerEndpoint, kMaxPeers> peers{};  ///< 入口地址列表
-    size_t peer_count = 0;                        ///< 入口数量
+    PeerEndpointList peers{};  ///< 入口地址列表（条数由配置决定，无固定上限）
 
     bool has_static_ipv4 = false;  ///< 是否配置了静态虚拟 IPv4
     uint32_t static_ipv4 = 0;      ///< 静态虚拟 IPv4（数值表示）

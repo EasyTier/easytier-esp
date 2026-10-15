@@ -30,6 +30,13 @@ inline constexpr size_t kTomlHeapBudget = CONFIG_EASYTIER_ESP_TOML_HEAP_BUDGET;
 inline constexpr size_t kTomlHeapBudget = 256 * 1024;
 #endif
 
+/** @brief 同时连接的入口节点数上限（超出部分的入口作为轮换备用）。 */
+#if defined(CONFIG_EASYTIER_ESP_MAX_CONNECTED_PEERS)
+inline constexpr size_t kMaxConnectedPeers = CONFIG_EASYTIER_ESP_MAX_CONNECTED_PEERS;
+#else
+inline constexpr size_t kMaxConnectedPeers = 6;
+#endif
+
 /** @brief 并发 RPC 事务上限。 */
 #if defined(CONFIG_EASYTIER_ESP_RPC_MAX_TRANSACTIONS)
 inline constexpr size_t kRpcMaxTransactions = CONFIG_EASYTIER_ESP_RPC_MAX_TRANSACTIONS;
@@ -50,8 +57,6 @@ inline constexpr size_t kTomlMaxNodes = 1024;
 inline constexpr size_t kTomlMaxArrayItems = 256;
 /** @brief 单张 TOML 表的键数量上限。 */
 inline constexpr size_t kTomlMaxTableKeys = 256;
-/** @brief 输入中 [[peer]] 条目数上限（筛选后仍受 kMaxPeers 限制）。 */
-inline constexpr size_t kTomlMaxPeerEntries = 64;
 
 /** @brief 单个共享帧的字节数：4 字节 TCP 长度前缀 + 2000 字节报文，向上取整。 */
 inline constexpr size_t kFrameBytes = 2048;
@@ -73,5 +78,7 @@ static_assert(kRpcMaxTransactions >= 1 && kRpcMaxTransactions <= 16,
               "RPC 事务上限必须落在 [1,16]");
 static_assert(kRpcReassemblySlots >= 1 && kRpcReassemblySlots <= 8,
               "RPC 重组槽必须落在 [1,8]（每槽约 16 KiB）");
+static_assert(kMaxConnectedPeers >= 1 && kMaxConnectedPeers <= 8,
+              "同时连接的入口数必须落在 [1,8]（每槽约 12 KiB 收发缓冲）");
 
 }  // namespace et

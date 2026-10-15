@@ -25,15 +25,18 @@
 #include "route/sync_messages.hpp"
 #include "route/table.hpp"
 #include "route/topology.hpp"
+#include "support/config_limits.hpp"
 
 namespace et {
 
 /**
  * @brief 同时保持的直连对端上限。
- * @details 与 `kMaxConnSlots`（context.hpp，仅设备侧）解耦，保证本头文件与引擎在宿主
- *          测试里也能独立编译。
+ * @details 取 Kconfig 的 `EASYTIER_ESP_MAX_CONNECTED_PEERS`（默认 6），必须不小于
+ *          连接槽数量，否则超出部分的对端会被静默忽略。数值来自
+ *          `support/config_limits.hpp`（宿主构建同样有默认值），因此本头文件与引擎
+ *          仍可在宿主测试里独立编译。
  */
-inline constexpr size_t kMaxActivePeers = 4;
+inline constexpr size_t kMaxActivePeers = kMaxConnectedPeers;
 
 /**
  * @brief 路由同步引擎。
@@ -187,7 +190,29 @@ private:
     static void add_missing(std::array<uint32_t, kPbMaxRepeatedItems>& list, size_t& count,
                             uint32_t peer_id) noexcept;
 
-    StoredConfig config_{};              ///< 配置副本（只用到其中少数字段）
+    /**
+     * @brief 引擎需要的配置子集。
+     * @details 刻意只保存少数字段、**不含入口地址列表**：入口列表按实际条数动态分配，
+     *          引擎没有必要持有它，这样既避免拷贝也缩小 `Context` 常驻内存。
+     */
+    struct EngineConfig {
+        std::array<uint8_t, 16> instance_id{};            ///< 实例 UUID
+        std::array<char, kMaxHostnameBytes> hostname{};    ///< 主机名（已规范化）
+        bool has_static_ipv4 = false;                      ///< 是否配置了静态虚拟 IPv4
+        uint32_t static_ipv4 = 0;                          ///< 静态虚拟 IPv4
+        uint8_t static_prefix = 24;                        ///< 静态前缀长度
+        bool dhcp = false;                                 ///< 是否启用虚拟地址自分配
+        bool dhcp_has_subnet = false;                      ///< 是否显式配置了 dhcp 子网
+        uint32_t dhcp_subnet = kDefaultDhcpSubnet;         ///< dhcp 子网网络号
+        uint8_t dhcp_prefix = kDefaultDhcpPrefix;          ///< dhcp 子网前缀长度
+
+        /** @brief 主机名视图。 */
+        [[nodiscard]] std::string_view hostname_view() const noexcept {
+            return {hostname.data()};
+        }
+    };
+
+    EngineConfig config_{};              ///< 配置子集（只用到其中少数字段）
     uint32_t my_peer_id_ = 0;            ///< 本节点 peer id
     /** @brief 一个已握手直连对端（会话 id 每连接一份）。 */
     struct ActivePeer {

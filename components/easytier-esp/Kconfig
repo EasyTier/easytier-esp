@@ -1,44 +1,55 @@
 menu "EasyTier-ESP"
 
     choice EASYTIER_ESP_LOG_LEVEL
-        prompt "EasyTier-ESP log level"
+        prompt "组件日志等级"
         default EASYTIER_ESP_LOG_INFO
         help
-            Select the highest component log level to compile in.
+            选择编译进固件的最高日志等级。低于所选等级的日志语句会在编译期被
+            完全裁剪（无运行期开销，也不占固件体积）；Closed 表示关闭组件全部
+            日志。ESP-IDF 的全局日志等级仍会叠加生效。
 
         config EASYTIER_ESP_LOG_CLOSED
-            bool "Closed"
+            bool "Closed（关闭全部日志）"
 
         config EASYTIER_ESP_LOG_ERROR
-            bool "Error"
+            bool "Error（仅错误）"
 
         config EASYTIER_ESP_LOG_WARNING
-            bool "Warning"
+            bool "Warning（错误与警告）"
 
         config EASYTIER_ESP_LOG_INFO
-            bool "Info"
+            bool "Info（默认）"
 
         config EASYTIER_ESP_LOG_DEBUG
-            bool "Debug"
+            bool "Debug（全部日志）"
     endchoice
 
+    config EASYTIER_ESP_MAX_CONNECTED_PEERS
+        int "同时连接的入口节点数上限"
+        range 1 8
+        default 6
+        help
+            配置里可以写任意多个入口地址，此选项只限制同一时刻最多建立多少条
+            TCP 连接；超出部分的入口作为轮换备用，连接失败时按退避轮换使用。
+            每个连接槽约占 12 KiB 堆内存（收发缓冲），请结合可用内存调整。
+
     config EASYTIER_ESP_RPC_MAX_TRANSACTIONS
-        int "Maximum concurrent RPC transactions"
+        int "并发 RPC 事务数上限"
         range 1 16
         default 4
 
     config EASYTIER_ESP_RPC_REASSEMBLY_SLOTS
-        int "Maximum concurrent RPC reassembly slots"
+        int "RPC 分片重组槽数量"
         range 1 8
         default 2
 
     config EASYTIER_ESP_TOML_MAX_BYTES
-        int "Maximum TOML configuration size in bytes"
+        int "TOML 配置文本最大字节数"
         range 1024 65536
         default 16384
 
     config EASYTIER_ESP_TOML_HEAP_BUDGET
-        int "Maximum cumulative heap bytes a single TOML parse may allocate"
+        int "单次 TOML 解析允许申请的堆字节上限"
         range 16384 1048576
         default 262144
 

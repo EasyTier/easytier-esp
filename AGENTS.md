@@ -14,7 +14,7 @@
 - `components/easytier-esp/include/easytier-esp.h`：公开 C++ API、配置、状态、事件和诊断。
 - `components/easytier-esp/src/`：组件实现；`config/`、`crypto/`、`protocol/`、`transport/`、`peer/`、`rpc/`、`route/`、`netif/`、`data/` 为主要模块。
 - `instance.cpp` / `context.hpp`：运行资源、队列、生命周期、共享原子状态。
-- `io_task.cpp`：socket 的唯一所有者；最多两个并发连接槽，最多配置十个入口，其余轮换备用。不能把一个入口重复连接到两个槽，重试不得阻塞已有连接的收发。
+- `io_task.cpp`：socket 的唯一所有者；并发连接槽数量由 Kconfig `EASYTIER_ESP_MAX_CONNECTED_PEERS`（默认 6）决定，**入口条目数不设上限**，其余入口轮换备用。不能把一个入口重复连接到两个槽，重试不得阻塞已有连接的收发。
 - `proto_task.cpp`：握手、保活、RPC、路由同步和路由快照发布；`data_task.cpp`：虚拟网卡数据、加解密与中继转发。
 - `main/`：应用示例，仅负责 NVS、事件循环、WiFi、加载 TOML 和 underlay 通知，不放协议实现。
 - 当前工作区没有 `tests/` 或 `test_apps/`；旧文档中的测试记录不能作为当前可执行入口，不要自行恢复用户移除的目录。
@@ -25,7 +25,7 @@
 本机上游源码在 `~/Desktop/EasyTier/`。变更协议、默认值或配置语义时读取当前源码，不凭旧总结推断。当前上游配置入口主要在 `easytier-core/src/config/toml.rs`，运行期 Host 归一化在 `easytier-core/src/instance/config.rs`；旧路径可能仅作 re-export。
 
 - TOML：采用支持且有效的非 peer 字段；未知、无关或无法采用的非 peer 字段忽略并报告，不因缺少入口/地址拒绝解析。真正语法错误、读取失败、解析资源耗尽分别报告。
-- **peer 只能多写附加字段，不能写错入口**：协议不支持、IPv6、无效 URI/主机/端口、错误类型、缺少 `uri` 或超过十个入口必须报错，即使同时有其他有效入口。TOML 与编程式配置共用入口 URI 校验。
+- **peer 只能多写附加字段，不能写错入口**：协议不支持、IPv6、无效 URI/主机/端口、错误类型、缺少 `uri` 必须报错，即使同时有其他有效入口。TOML 与编程式配置共用入口 URI 校验。入口条目数**没有上限**（按实际条数分配），只有可同时连接的数量受 Kconfig 限制。
 - 缺省实例名和网络名为 `default`，网络密钥为空，MTU 为 1380，静态 IPv4 与 peer 列表缺省为空，DHCP 缺省关闭。DHCP 自举回落子网为 `10.126.126.0/24`，可以优先采用网络中宣告的网段。
 - 缺省实例 UUID 在初始化时生成并缓存 UUID v4；显式 UUID（包括全零 UUID）不得被覆盖。主机名遵循“有效显式值优先，否则 Host fallback”，ESP fallback 按用户要求为 **`Espressif`**。
 - `EMBED_TXTFILES` 的 `end-start` 包含末尾 NUL，不能把终止符当作 TOML 内容；内部非法 NUL 仍要拒绝。

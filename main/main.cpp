@@ -131,6 +131,12 @@ void log_effective_config() {
         ESP_LOGI(kTag, "config: peer[%u]=%s", static_cast<unsigned>(i),
                  g_config_info.peers[i].text.data());
     }
+    if (g_config_info.peers_truncated) {
+        // 入口条目数没有上限，但诊断快照只保留前几条，这里明确提示总数。
+        ESP_LOGW(kTag, "config: %u entry peers configured, only the first %u are shown",
+                 static_cast<unsigned>(g_config_info.peer_total_count),
+                 static_cast<unsigned>(g_config_info.peer_count));
+    }
     if (g_config_info.has_static_ipv4) {
         ESP_LOGI(kTag, "config: ipv4=%u.%u.%u.%u/%u mtu=%u",
                  static_cast<unsigned>((g_config_info.static_ipv4 >> 24) & 0xFF),

@@ -68,7 +68,11 @@ constexpr const char* kTag = "ET.CONFIG";
 
 /** @brief 复位为默认配置（instance_name/network_name = "default"，密钥为空串）。 */
 void apply_config_defaults(StoredConfig& cfg) noexcept {
+    // 入口列表可能分配得较大：先把已分配容量搬出来再复位，避免每次初始化都重新分配。
+    PeerEndpointList peers = std::move(cfg.peers);
+    peers.clear();
     cfg = StoredConfig{};
+    cfg.peers = std::move(peers);
     (void)set_fixed_string(cfg.instance_name, "default");
     (void)set_fixed_string(cfg.network_name, "default");
     (void)set_fixed_string(cfg.hostname, "Espressif");
@@ -317,16 +321,13 @@ bool parse_peer_endpoint(std::string_view uri, PeerEndpoint& out) noexcept {
 
 /**
  * @brief 结构完整性校验。
- * @details 要求：至少 1 个入口（且不超过 kMaxPeers）、必须配置静态 IPv4 或 dhcp、
- *          MTU 在范围内、网络名非空、每个入口都有主机名与端口。
+ * @details 要求：至少 1 个入口、必须配置静态 IPv4 或 dhcp、MTU 在范围内、网络名非空、
+ *          每个入口都有主机名与端口。入口数量本身没有上限，只有可同时连接的数量由
+ *          Kconfig 决定（见 @ref kMaxConnectedPeers）。
  */
 esp_err_t validate_stored_config(const StoredConfig& cfg) noexcept {
-    if (cfg.peer_count == 0) {
+    if (cfg.peers.size() == 0) {
         ET_LOGE(kTag, "no usable entry peer configured");
-        return ESP_ERR_INVALID_ARG;
-    }
-    if (cfg.peer_count > kMaxPeers) {
-        ET_LOGE(kTag, "too many entry peers: %u", static_cast<unsigned>(cfg.peer_count));
         return ESP_ERR_INVALID_ARG;
     }
     if (!cfg.has_static_ipv4 && !cfg.dhcp) {
@@ -341,7 +342,7 @@ esp_err_t validate_stored_config(const StoredConfig& cfg) noexcept {
         ET_LOGE(kTag, "network_name must not be empty");
         return ESP_ERR_INVALID_ARG;
     }
-    for (size_t i = 0; i < cfg.peer_count; ++i) {
+    for (size_t i = 0; i < cfg.peers.size(); ++i) {
         if (cfg.peers[i].host[0] == '\0' || cfg.peers[i].port == 0) {
             ET_LOGE(kTag, "entry peer %u is incomplete", static_cast<unsigned>(i));
             return ESP_ERR_INVALID_ARG;
@@ -388,9 +389,14 @@ esp_err_t stored_config_from_config(const Config& config, StoredConfig& out,
         return ESP_ERR_INVALID_ARG;
     }
     out.has_instance_id = !config.instance_id.empty();
-    if (config.peers.size() > kMaxPeers) {
-        ET_LOGE(kTag, "too many entry peers: %u", static_cast<unsigned>(config.peers.size()));
-        return ESP_ERR_INVALID_ARG;
+    // 入口数量无固定上限：按实际条数分配。programmatic 入口仍逐个严格校验。
+    if (config.peers.size() != 0) {
+        const esp_err_t reserve_err = out.peers.reserve(config.peers.size());
+        if (reserve_err != ESP_OK) {
+            ET_LOGE(kTag, "cannot allocate %u entry peers",
+                    static_cast<unsigned>(config.peers.size()));
+            return reserve_err;
+        }
     }
     for (const std::string_view peer : config.peers) {
         PeerEndpoint endpoint{};
@@ -399,7 +405,7 @@ esp_err_t stored_config_from_config(const Config& config, StoredConfig& out,
             ET_LOGE(kTag, "invalid or unsupported entry peer URI");
             return ESP_ERR_INVALID_ARG;
         }
-        out.peers[out.peer_count++] = endpoint;
+        out.peers.push_back(endpoint);
     }
 
     if (!config.virtual_ipv4.empty()) {

@@ -18,6 +18,7 @@
 
 #include "easytier-esp.h"
 #include "config/config.hpp"
+#include "support/config_limits.hpp"
 #include "crypto/aes_gcm.hpp"
 #include "protocol/wire.hpp"
 #include "data/plane.hpp"
@@ -41,9 +42,9 @@ namespace et {
 /** @brief TCP 传输对象（仅 I/O 任务使用）。 */
 class TcpConn;
 
-/** @brief 任务退出确认用的信号量上限（I/O + 控制面 + 数据面三个任务）。 */
-/// 支持的最大并发入口连接数（配置可写更多入口，多出的作为轮换备用）。
-inline constexpr size_t kMaxConnSlots = 2;
+/// 支持的最大并发入口连接数（Kconfig `EASYTIER_ESP_MAX_CONNECTED_PEERS`，默认 6）。
+/// 配置里可以写任意多个入口，多出的入口作为轮换备用。
+inline constexpr size_t kMaxConnSlots = kMaxConnectedPeers;
 /// FrameMessage.slot 的特殊值：不指定槽位（由 I/O 任务按 to_peer 选择）。
 inline constexpr uint8_t kAnySlot = 0xFF;
 

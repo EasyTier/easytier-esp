@@ -40,15 +40,16 @@ constexpr const char* kTag = "ET.INSTANCE";
 /** @brief 队列深度（帧队列容量有限，形成背压）。 */
 constexpr UBaseType_t kFrameQueueDepth = 4;
 // 单个实例的常驻内存必须保持有界：Context 在堆上分配（大于 16 KiB 的分配会走
-// PSRAM），但仍要有上限，避免后续加入功能时悄悄膨胀。
-// 当前约 80 KiB（拓扑 32 个节点 + 两个邻接表 + RPC 重组缓冲 + 服务缓冲）。
-// 单个实例的常驻内存必须保持有界。实测组成（ESP32-S3，字节）：
-//   Context 合计 99248
+// PSRAM），但仍要有上限，避免后续加入功能时悄悄膨胀。实测组成（ESP32-S3，字节）：
+//   Context 合计 93768
 //     ├─ RpcReassembler（2 槽 × (8 KiB 收包 + 8 KiB 有序缓冲)）33184
-//     ├─ SyncEngine（Topology 22928 + 2 个 ConnList 8968 + 快照 656 + 编码缓冲）38512
+//     ├─ SyncEngine（Topology 22928 + 2 个 ConnList 8968 + 快照 656 + 编码缓冲）约 33000
 //     ├─ RPC 收发缓冲（body 8 KiB + service 4 KiB + 其它）约 14000
 //     └─ 其它（AEAD 指针、原子量、dhcp/网卡状态等）
-// 另外每个实例还有：帧队列 4×2008×3 ≈ 24 KiB、TcpConn 约 12 KiB（堆）、
+// 入口地址列表不再占用 Context 常驻内存：它按配置实际条数单独在堆上分配，因此配置里
+// 写多少入口都不会让 Context 膨胀。
+// 另外每个实例还有：帧队列 4×2008×3 ≈ 24 KiB、每个连接槽一个 TcpConn 约 12 KiB（堆，
+// 数量见 Kconfig `EASYTIER_ESP_MAX_CONNECTED_PEERS`，默认 6）、
 // 三个任务栈 6+10+8 = 24 KiB。因此**强烈建议启用 PSRAM**（示例 sdkconfig 已启用，
 // 大于 16 KiB 的分配会落到 PSRAM）。新增缓冲时请同步更新本注释与 README 的内存表。
 static_assert(sizeof(Context) < 112 * 1024, "Context 常驻内存超出预算，请检查新增缓冲");
@@ -73,14 +74,14 @@ constexpr UBaseType_t kDataTaskPriority = 7;
 /** @brief 全局单实例标记。 */
 std::atomic<bool> g_instance_in_use{false};
 
-/** @brief 把校验后的配置与运行选项复制进上下文。 */
-void prepare_context(Context& ctx, const StoredConfig& config,
+/** @brief 把校验后的配置（含入口列表所有权）与运行选项移入上下文。 */
+void prepare_context(Context& ctx, StoredConfig&& config,
                      const RuntimeOptions& options) noexcept {
-    ctx.config = config;
+    ctx.config = std::move(config);
     finalize_config_identity(ctx.config);
     ctx.options = options;
-    ctx.key = derive_key_128(config.network_secret_view());
-    ctx.digest = secret_digest(config.network_name_view(), config.network_secret_view());
+    ctx.key = derive_key_128(ctx.config.network_secret_view());
+    ctx.digest = secret_digest(ctx.config.network_name_view(), ctx.config.network_secret_view());
     uint32_t peer_id = random_u32();
     ctx.my_peer_id.store(peer_id == 0 ? 1u : peer_id);
 }
@@ -150,10 +151,11 @@ esp_err_t start_runtime(Context& ctx) noexcept {
     ctx.my_ipv4.store(ctx.config.has_static_ipv4 ? ctx.config.static_ipv4 : 0);
     ctx.my_prefix.store(ctx.config.has_static_ipv4 ? ctx.config.static_prefix : 24);
     ctx.reachable_routes.store(0);
-    // 打印常驻内存规模，便于真机 bring-up 时核对内存预算。
-    ET_LOGI(kTag, "runtime context: %u bytes; frame queues: ctrl=%u data=%u tx=%u",
-            static_cast<unsigned>(sizeof(Context)), static_cast<unsigned>(kFrameQueueDepth),
-            static_cast<unsigned>(kFrameQueueDepth), static_cast<unsigned>(kFrameQueueDepth));
+    // 打印常驻内存规模与并发连接槽数，便于真机 bring-up 时核对 Kconfig 是否生效。
+    ET_LOGI(kTag, "runtime context: %u bytes; slots: %u; frame queues: ctrl=%u data=%u tx=%u",
+            static_cast<unsigned>(sizeof(Context)), static_cast<unsigned>(kMaxConnSlots),
+            static_cast<unsigned>(kFrameQueueDepth), static_cast<unsigned>(kFrameQueueDepth),
+            static_cast<unsigned>(kFrameQueueDepth));
     // 静态地址时立即可用；dhcp 地址在控制面算出后再创建网卡。
     // 与物理网段重叠的虚拟网段会破坏正常路由，这里显式拒绝（见 proto_task 的同名检查）。
     if (ctx.config.has_static_ipv4) {
@@ -310,7 +312,7 @@ esp_err_t Instance::init(const Config& config, const RuntimeOptions& options) no
     // 单实例设计（见 g_instance_in_use），且初始化只发生一次。
     static StoredConfig stored;
     static ConfigReport report;
-    stored = StoredConfig{};
+    // stored_config_from_config() 内部会先复位为默认值，这里无需重复复位。
     const esp_err_t err = stored_config_from_config(config, stored, &report);
     if (err != ESP_OK) {
         return err;
@@ -321,8 +323,8 @@ esp_err_t Instance::init(const Config& config, const RuntimeOptions& options) no
 esp_err_t Instance::init_from_toml(std::string_view text, const RuntimeOptions& options,
                                   ConfigReport* report) noexcept {
     // 同上：解析缓冲放在静态区，保证调用方无论栈多大都安全。
+    // parse_toml_config() 内部会先复位为默认值，这里无需重复复位。
     static StoredConfig stored;
-    stored = StoredConfig{};
     const esp_err_t err = parse_toml_config(text, stored, report);
     if (err != ESP_OK) {
         return err;
@@ -357,12 +359,13 @@ esp_err_t Instance::init_from_file(std::string_view path, const RuntimeOptions& 
 }
 
 /** @brief 由校验后的配置完成初始化（三个 init* 入口共用）。 */
-esp_err_t Instance::init_from_internal(const void* stored_config,
+esp_err_t Instance::init_from_internal(void* stored_config,
                                        const RuntimeOptions& options) noexcept {
     if (stored_config == nullptr) {
         return ESP_ERR_INVALID_ARG;
     }
-    const auto& stored = *static_cast<const StoredConfig*>(stored_config);
+    // 入口列表的所有权在这里移交给 Context，因此 stored 是可变引用。
+    auto& stored = *static_cast<StoredConfig*>(stored_config);
     if (impl_ != nullptr) {
         return ESP_ERR_INVALID_STATE;
     }
@@ -381,7 +384,7 @@ esp_err_t Instance::init_from_internal(const void* stored_config,
         g_instance_in_use.store(false);
         return ESP_ERR_NO_MEM;
     }
-    prepare_context(impl->ctx, stored, options);
+    prepare_context(impl->ctx, std::move(stored), options);
     impl->ctx.state.store(State::Stopped);
     impl_ = impl;
     return ESP_OK;
@@ -467,7 +470,9 @@ esp_err_t Instance::get_config_info(ConfigInfo& out) const noexcept {
     std::memcpy(out.network_name.data(), cfg.network_name.data(),
                 std::min(out.network_name.size() - 1, cfg.network_name.size()));
     format_uuid_text(cfg.instance_id.data(), out.instance_id.data());
-    out.peer_count = cfg.peer_count > out.peers.size() ? out.peers.size() : cfg.peer_count;
+    out.peer_total_count = cfg.peers.size();
+    out.peer_count = cfg.peers.size() > out.peers.size() ? out.peers.size() : cfg.peers.size();
+    out.peers_truncated = cfg.peers.size() > out.peer_count;
     for (size_t i = 0; i < out.peer_count; ++i) {
         // 主机名最长 255 字节而缓冲 200：用精度限长，避免编译期截断告警。
         (void)snprintf(out.peers[i].text.data(), out.peers[i].text.size(), "%.180s:%u",

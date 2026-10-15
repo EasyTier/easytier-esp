@@ -22,8 +22,12 @@
 
 namespace et {
 
-/** @brief 允许配置的最大入口 peer 数量。 */
-inline constexpr size_t kMaxPeers = 10;
+/**
+ * @brief @ref ConfigInfo 能快照的入口数量上限（仅影响诊断输出，不影响实际配置）。
+ * @note 实际入口数量没有上限；超过该数量时 @ref ConfigInfo::peers_truncated 为 true，
+ *       完整数量见 @ref ConfigInfo::peer_total_count 。
+ */
+inline constexpr size_t kConfigInfoMaxPeers = 16;
 /** @brief @ref ConfigReport 能携带的最大诊断条数。 */
 inline constexpr size_t kMaxDiagnostics = 32;
 /** @brief 每条诊断记录的字段路径最大长度（含结尾 '\0'）。 */
@@ -43,7 +47,9 @@ struct Config {
     std::string_view instance_id{};              ///< 实例 UUID 文本，空表示随机生成
     std::string_view network_name = "default";   ///< 网络名，必须与对端一致
     std::string_view network_secret{};           ///< 网络密钥，缺省为空字符串
-    std::span<const std::string_view> peers{};   ///< 入口地址，形如 "tcp://host:port"
+    /// 入口地址，形如 "tcp://host:port"。条目数量没有上限；同一时刻实际建立的连接数
+    /// 由 Kconfig 的 `EASYTIER_ESP_MAX_CONNECTED_PEERS`（默认 6）决定，其余轮换备用。
+    std::span<const std::string_view> peers{};
     std::string_view virtual_ipv4{};             ///< 静态虚拟 IPv4，可带 "/前缀"；非空时忽略 dhcp
     bool dhcp = false;                           ///< 未配置静态地址时按上游语义自分配虚拟 IPv4
     std::string_view dhcp_subnet{};              ///< dhcp 子网，空表示使用上游默认 10.126.126.0/24
@@ -95,6 +101,8 @@ enum class EventType : uint8_t {
  * @details 用固定缓冲区承载，不引用 @ref Instance 内部对象，可以安全地跨任务拷贝与
  *          打印——联调时"实际生效的配置到底是什么"往往是最关键的信息（例如 TOML 里
  *          写了 ipv4 又被 dhcp 覆盖、前缀被规范成 /24、入口地址被忽略等）。
+ *          入口数量本身没有上限，本结构只快照前 @ref kConfigInfoMaxPeers 条，
+ *          因此额外提供 @ref peer_total_count 与 @ref peers_truncated 。
  */
 struct ConfigInfo {
     /** @brief 一个入口地址（已格式化为 host:port）。 */
@@ -106,8 +114,10 @@ struct ConfigInfo {
     std::array<char, 64> hostname{};       ///< 主机名（可能为空）
     std::array<char, 64> network_name{};   ///< 网络名
     std::array<char, 37> instance_id{};    ///< 实例 UUID 文本
-    std::array<Peer, kMaxPeers> peers{};   ///< 入口列表
-    size_t peer_count = 0;                 ///< 入口数量
+    std::array<Peer, kConfigInfoMaxPeers> peers{};  ///< 入口列表（最多 kConfigInfoMaxPeers 条）
+    size_t peer_count = 0;         ///< @ref peers 中已填充的条数
+    size_t peer_total_count = 0;   ///< 实际配置的入口总条数（可能大于 peer_count）
+    bool peers_truncated = false;  ///< 入口总条数是否超过 @ref peers 的容量
     bool has_static_ipv4 = false;          ///< 是否配置了静态虚拟 IPv4
     uint32_t static_ipv4 = 0;              ///< 静态虚拟 IPv4（数值表示）
     uint8_t static_prefix = 24;            ///< 静态前缀长度
@@ -349,10 +359,11 @@ private:
 
     /**
      * @brief 三个 init* 入口共用的初始化路径。
-     * @param stored_config 指向内部 StoredConfig 的指针（为避免公开内部类型而用 void*）
+     * @param stored_config 指向内部 StoredConfig 的指针（为避免公开内部类型而用 void*）；
+     *        入口列表的所有权会被移走，因此必须传非 const 指针
      * @note 仅组件内部使用，不属于公开 API。
      */
-    esp_err_t init_from_internal(const void* stored_config,
+    esp_err_t init_from_internal(void* stored_config,
                                  const RuntimeOptions& options) noexcept;
 };
 

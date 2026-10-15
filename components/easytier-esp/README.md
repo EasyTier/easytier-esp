@@ -45,7 +45,8 @@
 
 - 真机验证：虚拟网卡的 pbuf 所有权、dhcp 换址、经中继的端到端 ICMP/TCP/UDP 需要在
   ESP32-S3 上实际运行（需 Linux 入口节点）；
-- 按延迟选路的 ECMP、以及超过 2 条的并发入口连接（当前 2 个连接槽 + 其余入口轮换备用）；
+- 按延迟选路的 ECMP（并发入口连接数由 Kconfig 的 `EASYTIER_ESP_MAX_CONNECTED_PEERS`
+  控制，默认 6；配置里的其它入口轮换备用）；
 - UDP mux、NAT 打洞；
 - Noise/credential、共享公共中继/foreign network、IPv6、子网代理、出口节点、
   Magic DNS、KCP/QUIC、管理界面；
@@ -84,7 +85,7 @@ disable_p2p = true
 字段处理分三类：
 
 1. **支持并应用**：`instance_name`、`hostname`、`instance_id`、`ipv4`、`dhcp`、
-   `network_identity.network_name/network_secret`、`[[peer]].uri`（`tcp://`，最多 10 个）、
+   `network_identity.network_name/network_secret`、`[[peer]].uri`（`tcp://`，**条目数量无上限**）、
    `flags.mtu`（576..1380）、`flags.enable_encryption`（布尔，缺省 `true`，别名
    `enableEncryption`）。
 2. **忽略并报告**：`listeners`、`routes`、`proxy_network`、`port_forward`、`exit_nodes`、
@@ -94,8 +95,11 @@ disable_p2p = true
 3. **非 peer 字段无法采用也忽略**：类型错误、无效 IPv4/UUID/DHCP/MTU、超过字段
    存储容量的值均跳过，保留默认值，其余有效字段继续提取。
 4. **peer 只能写对**：非数组/非表、缺少 uri、uri 类型错误、无效主机或端口、
-   非 TCP 协议、IPv6、超过 10 个入口均报错；不能通过另一个有效 peer 掩盖错误。
+   非 TCP 协议、IPv6 均报错；不能通过另一个有效 peer 掩盖错误。
    peer 表内额外的无关字段仍忽略。TOML 与编程式 Config 使用同一入口 URI 校验。
+
+入口**数量**不设上限（只受 TOML 文本长度与解析预算约束）；**同时连接**的数量由
+Kconfig 的 `EASYTIER_ESP_MAX_CONNECTED_PEERS` 决定（默认 6），其余入口作为轮换备用。
 
 TOML 语法错误、peer 配置错误或解析长度/深度/内存预算耗尽会返回错误；VFS 读取失败另报
 读取错误。空文档、无关字段、缺少入口或虚拟地址都可以加载；加载成功不代表组网成功。
@@ -179,9 +183,13 @@ void start_easytier() {
 
 ## 资源上限
 
-编译期上限通过 Kconfig 配置（`CONFIG_EASYTIER_ESP_*`）：帧池大小、并发 RPC 事务、
-分片重组槽、拓扑 CIDR 数量、TOML 文本长度与解析内存预算。容量不足时返回明确错误码
+编译期上限通过 Kconfig 配置（`CONFIG_EASYTIER_ESP_*`）：**同时连接**的入口数、组件日志
+等级、并发 RPC 事务、分片重组槽、TOML 文本长度与解析内存预算。容量不足时返回明确错误码
 并在诊断中体现，不会静默截断。
+
+入口地址**条目数不受这些上限约束**：列表按实际条数在堆上分配，能写多少只取决于 TOML
+文本长度（`EASYTIER_ESP_TOML_MAX_BYTES`）与解析预算（`EASYTIER_ESP_TOML_HEAP_BUDGET`）。
+`EASYTIER_ESP_MAX_CONNECTED_PEERS` 只决定同一时刻建立多少条连接。
 
 ## 线程与回调约束
 
@@ -206,6 +214,7 @@ void start_easytier() {
 | 选项 | 默认 | 作用 |
 | --- | --- | --- |
 | `EASYTIER_ESP_LOG_LEVEL` | Info | 组件日志编译等级：Closed、Error、Warning、Info、Debug；低于所选等级的调用会在编译期裁剪，Closed 裁剪全部日志 |
+| `EASYTIER_ESP_MAX_CONNECTED_PEERS` | 6 | **同时连接**的入口节点数上限（1..8）。配置里的入口条目数不受此限制，多出的作为轮换备用；每槽约 12 KiB 收发缓冲 |
 | `EASYTIER_ESP_TOML_MAX_BYTES` | 16384 | TOML 文本/文件上限 |
 | `EASYTIER_ESP_TOML_HEAP_BUDGET` | 262144 | 单次 TOML 解析允许累计申请的堆字节上限 |
 | `EASYTIER_ESP_RPC_MAX_TRANSACTIONS` | 4 | 并发 RPC 事务上限 |
@@ -218,9 +227,10 @@ void start_easytier() {
 
 | 项目 | 大小 | 说明 |
 | --- | --- | --- |
-| `Context`（堆） | 99,248 B | RPC 重组 33,184（2 槽 × 16 KiB）+ `SyncEngine` 38,512（拓扑 22,928 + 邻接表 8,968 + 快照与编码缓冲）+ RPC 收发缓冲约 14,000 + 其它 |
+| `Context`（堆） | 93,768 B | RPC 重组 33,184（2 槽 × 16 KiB）+ `SyncEngine` 约 33,000（拓扑 22,928 + 邻接表 8,968 + 快照与编码缓冲）+ RPC 收发缓冲约 14,000 + 其它 |
+| 入口地址列表（堆） | 每条约 260 B | 按配置实际条数分配，不占用 `Context`；条目数量无上限 |
 | 帧队列 | 约 24 KiB | 控制面 / 数据面 / 发送队列各 4 × 2008 B |
-| `TcpConn`（堆） | 约 12 KiB | 收发缓冲，单连接 |
+| `TcpConn`（堆） | 约 12 KiB × 连接数 | 每槽一份收发缓冲，槽数见 `EASYTIER_ESP_MAX_CONNECTED_PEERS`（默认 6） |
 | 任务栈 | 24 KiB | I/O 6 KiB + 控制面 10 KiB + 数据面 8 KiB |
 | TOML 解析 | ≤ 256 KiB（瞬时） | 受 `EASYTIER_ESP_TOML_HEAP_BUDGET` 限制 |
 

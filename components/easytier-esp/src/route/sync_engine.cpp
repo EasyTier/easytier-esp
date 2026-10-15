@@ -19,7 +19,17 @@ constexpr const char* kTag = "ET.SYNC";
 
 /** @brief 配置引擎并复位状态。 */
 void SyncEngine::configure(const StoredConfig& config, uint32_t my_peer_id) noexcept {
-    config_ = config;
+    // 只拷贝引擎真正需要的字段：入口列表可能很大，且引擎根本用不到它。
+    config_ = EngineConfig{};
+    config_.instance_id = config.instance_id;
+    (void)set_fixed_string(config_.hostname, config.hostname_view());
+    config_.has_static_ipv4 = config.has_static_ipv4;
+    config_.static_ipv4 = config.static_ipv4;
+    config_.static_prefix = config.static_prefix;
+    config_.dhcp = config.dhcp;
+    config_.dhcp_has_subnet = config.dhcp_has_subnet;
+    config_.dhcp_subnet = config.dhcp_subnet;
+    config_.dhcp_prefix = config.dhcp_prefix;
     my_peer_id_ = my_peer_id;
     reset();
     my_ipv4_ = config_.has_static_ipv4 ? config_.static_ipv4 : 0;

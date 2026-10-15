@@ -96,7 +96,7 @@ void post_frame(void* arg, Bytes body) noexcept {
 /** @brief 选择未被其它槽连接/连接中的入口；相同 host:port 只能占用一个槽。 */
 bool select_entry(const Context& ctx, const std::array<SlotState, kMaxConnSlots>& states,
                    size_t slot, size_t& index) noexcept {
-    const size_t count = ctx.config.peer_count;
+    const size_t count = ctx.config.peers.size();
     for (size_t offset = 0; offset < count; ++offset) {
         const size_t candidate = (index + offset) % count;
         const auto& peer = ctx.config.peers[candidate];
@@ -152,7 +152,7 @@ void drop_slot(Context& ctx, size_t slot, SlotState& st) noexcept {
         st.session_open = false;
     }
     // 轮换入口并指数退避，避免对同一入口高频重试。
-    const size_t peer_count = ctx.config.peer_count;
+    const size_t peer_count = ctx.config.peers.size();
     if (peer_count > 0) {
         st.peer_index = (st.peer_index + 1) % peer_count;
     }
@@ -214,7 +214,7 @@ void pump_tx(Context& ctx, std::array<SlotState, kMaxConnSlots>& states) noexcep
 /** @brief I/O 任务主循环。 */
 void io_task(void* arg) noexcept {
     auto& ctx = *static_cast<Context*>(arg);
-    const size_t peer_count = ctx.config.peer_count;
+    const size_t peer_count = ctx.config.peers.size();
     std::array<SlotState, kMaxConnSlots> states{};
     for (size_t i = 0; i < kMaxConnSlots; ++i) {
         if (ctx.slots[i].conn == nullptr) {

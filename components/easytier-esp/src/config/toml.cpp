@@ -227,13 +227,21 @@ void map_network_identity(ConfigReport* report, const toml_datum_t& top,
     }
 }
 
-/** @brief 严格读取 TCP 入口；错误、不支持或超容量均拒绝加载。 */
+/** @brief 严格读取 TCP 入口；条目数量无固定上限，错误或不支持的取值仍拒绝加载。 */
 esp_err_t map_peers(ConfigReport* report, const toml_datum_t& top, StoredConfig& out) noexcept {
     const toml_datum_t array = et_toml_get(top, "peer");
     if (array.type == TOML_UNKNOWN) return ESP_OK;
     if (array.type != TOML_ARRAY) {
         add_diag(report, ConfigIssue::InvalidValue, array, "peer");
         return ESP_ERR_INVALID_ARG;
+    }
+    // 入口数量不设固定上限：按数组实际长度一次分配到堆上。
+    if (array.u.arr.size > 0) {
+        const esp_err_t reserve_err = out.peers.reserve(static_cast<size_t>(array.u.arr.size));
+        if (reserve_err != ESP_OK) {
+            add_diag(report, ConfigIssue::ResourceLimit, array, "peer");
+            return reserve_err;
+        }
     }
     for (int32_t i = 0; i < array.u.arr.size; ++i) {
         const toml_datum_t entry = array.u.arr.elem[i];
@@ -257,11 +265,7 @@ esp_err_t map_peers(ConfigReport* report, const toml_datum_t& top, StoredConfig&
                      uri.type == TOML_UNKNOWN ? entry : uri, "peer.uri");
             return ESP_ERR_INVALID_ARG;
         }
-        if (out.peer_count >= kMaxPeers) {
-            add_diag(report, ConfigIssue::ResourceLimit, uri, "peer");
-            return ESP_ERR_INVALID_ARG;
-        }
-        out.peers[out.peer_count++] = endpoint;
+        out.peers.push_back(endpoint);
     }
     return ESP_OK;
 }
