@@ -1,0 +1,5 @@
+## IDF Component Manager Manifest File
+dependencies:
+  ## This component is developed and verified against ESP-IDF 6.1 only.
+  idf:
+    version: '>=6.1,<6.2'

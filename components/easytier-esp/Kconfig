@@ -1,0 +1,45 @@
+menu "EasyTier-ESP"
+
+    choice EASYTIER_ESP_LOG_LEVEL
+        prompt "EasyTier-ESP log level"
+        default EASYTIER_ESP_LOG_INFO
+        help
+            Select the highest component log level to compile in.
+
+        config EASYTIER_ESP_LOG_CLOSED
+            bool "Closed"
+
+        config EASYTIER_ESP_LOG_ERROR
+            bool "Error"
+
+        config EASYTIER_ESP_LOG_WARNING
+            bool "Warning"
+
+        config EASYTIER_ESP_LOG_INFO
+            bool "Info"
+
+        config EASYTIER_ESP_LOG_DEBUG
+            bool "Debug"
+    endchoice
+
+    config EASYTIER_ESP_RPC_MAX_TRANSACTIONS
+        int "Maximum concurrent RPC transactions"
+        range 1 16
+        default 4
+
+    config EASYTIER_ESP_RPC_REASSEMBLY_SLOTS
+        int "Maximum concurrent RPC reassembly slots"
+        range 1 8
+        default 2
+
+    config EASYTIER_ESP_TOML_MAX_BYTES
+        int "Maximum TOML configuration size in bytes"
+        range 1024 65536
+        default 16384
+
+    config EASYTIER_ESP_TOML_HEAP_BUDGET
+        int "Maximum cumulative heap bytes a single TOML parse may allocate"
+        range 16384 1048576
+        default 262144
+
+endmenu

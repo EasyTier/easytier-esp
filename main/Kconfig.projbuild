@@ -1,0 +1,26 @@
+menu "EasyTier-ESP 示例"
+
+    config EXAMPLE_WIFI_SSID
+        string "WiFi SSID"
+        default "ET_TEST_SSID"
+        help
+            示例连接的 WiFi 名称。生产固件建议改用配网流程而不是编译期常量。
+
+    config EXAMPLE_WIFI_PASSWORD
+        string "WiFi password"
+        default "ET_TEST_PWD"
+        help
+            示例使用的 WiFi 密码。
+
+    config EXAMPLE_WIFI_MAX_RETRY
+        int "WiFi 重连最大次数（0 表示无限重试）"
+        range 0 100
+        default 0
+
+    config EXAMPLE_EASYTIER_TOML_ENABLED
+        bool "启动时加载嵌入的 easytier.toml 并组网"
+        default y
+        help
+            关闭后示例只连接 WiFi，不启动 EasyTier（便于先验证网络连通性）。
+
+endmenu
