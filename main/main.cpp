@@ -5,7 +5,7 @@
  * @details 示例刻意保持简单，只做应用侧必须负责的事：
  * 1. 初始化 NVS、esp-netif 与默认事件循环；
  * 2. 以 STA 模式连接 WiFi，并在断开时自动重连；
- * 3. 用嵌入的 easytier.toml 构造 et::Config，并初始化 et::Inst；
+ * 3. 用嵌入的 easytier.toml 构造 et::Config（文件不存在时只连 WiFi），并初始化 et::Inst；
  * 4. 取得 IP 后启动组网并通知 underlay 就绪，失去 IP 时通知断开；
  * 5. 打印组件上报的组网事件。
  *
@@ -35,12 +35,21 @@ bool g_started = false;
 /** @brief WiFi 重连计数。 */
 int g_retry = 0;
 
-/** @brief CMake EMBED_TXTFILES 生成的符号：嵌入的 TOML 配置。 */
+/**
+ * @brief CMake EMBED_TXTFILES 生成的符号：嵌入的 TOML 配置。
+ * @note main/easytier.toml 含真实入口地址与网络密钥，已被 .gitignore 忽略，因此新克隆
+ *       的仓库里不存在，CMake 也不会嵌入（见 main/CMakeLists.txt）。
+ */
+#if defined(EASYTIER_EXAMPLE_TOML_EMBEDDED)
 extern const uint8_t easytier_toml_start[] asm("_binary_easytier_toml_start");
 extern const uint8_t easytier_toml_end[] asm("_binary_easytier_toml_end");
+#endif
 
-/** @brief 组件事件回调：只做打印，保持快速返回。 */
-void on_easytier_event(const et::Event& event, void*) noexcept {
+/**
+ * @brief 组件事件回调：只做打印，保持快速返回。
+ * @note 只有内嵌配置（EASYTIER_EXAMPLE_TOML_EMBEDDED）的构建才会注册它。
+ */
+[[maybe_unused]] void on_easytier_event(const et::Event& event, void*) noexcept {
     switch (event.type) {
         case et::EventType::Started:
             ESP_LOGI(kTag, "easytier started, peer_id=%u", static_cast<unsigned>(event.status.peer_id));
@@ -115,8 +124,11 @@ void log_status() {
              static_cast<int>(status.last_error));
 }
 
-/** @brief 打印实际生效的配置（TOML 的映射结果）。 */
-void log_effective_config() {
+/**
+ * @brief 打印实际生效的配置（TOML 的映射结果）。
+ * @note 只有内嵌配置（EASYTIER_EXAMPLE_TOML_EMBEDDED）的构建才会调用它。
+ */
+[[maybe_unused]] void log_effective_config() {
     if (et::Inst::get_config_info(g_config_info) != ESP_OK) {
         return;
     }
@@ -152,8 +164,11 @@ void log_effective_config() {
              g_config_info.enable_encryption ? "aes-gcm" : "disabled");
 }
 
-/** @brief 周期状态打印（10 秒一次，不占用任务栈）。 */
-void status_timer_cb(void*) { log_status(); }
+/**
+ * @brief 周期状态打印（10 秒一次，不占用任务栈）。
+ * @note 只有内嵌配置（EASYTIER_EXAMPLE_TOML_EMBEDDED）的构建才会注册它。
+ */
+[[maybe_unused]] void status_timer_cb(void*) { log_status(); }
 
 /// 组网启动任务的栈大小：解析 TOML、派生密钥都需要调用方提供足够栈。
 constexpr uint32_t kStartTaskStack = 8192;
@@ -181,6 +196,14 @@ void start_easytier() {
     if (g_started) {
         return;
     }
+#if !defined(EASYTIER_EXAMPLE_TOML_EMBEDDED)
+    // main/easytier.toml 不在版本库里（含真实地址与密钥），此构建没有内嵌配置：
+    // 只保持 WiFi 连接，不启动组网，并明确提示如何补上配置。
+    ESP_LOGW(kTag,
+             "main/easytier.toml not found; create it and rebuild "
+             "(TOML format: components/easytier-esp/README.md)");
+    return;
+#else
     auto len = static_cast<size_t>(easytier_toml_end - easytier_toml_start);
     // EMBED_TXTFILES 会把 NUL 计入 end-start；它是字符串终止符，不是 TOML 内容。
     if (len != 0 && easytier_toml_start[len - 1] == 0) --len;
@@ -236,6 +259,7 @@ void start_easytier() {
         }
     }
     log_status();
+#endif  // EASYTIER_EXAMPLE_TOML_EMBEDDED
 }
 
 /** @brief WiFi 与 IP 事件处理。 */

@@ -71,6 +71,9 @@ Thumbs.db
 ehthumbs.db
 Desktop.ini
 
+# 用户本地配置：含真实入口地址与网络密钥，不提交
+/main/easytier.toml
+
 # User-specific configuration files
 *.user
 *.workspace # General workspace files, can be from various tools
