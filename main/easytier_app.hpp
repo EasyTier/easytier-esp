@@ -12,9 +12,9 @@
  * @endcode
  *
  * @note **为什么启动要单独开一个任务**：组网初始化需要较大栈 —— TOML 解析的递归下降、
- *       @c Inst 构造函数内部的 @c Settings 临时对象、密钥派生，以及构造结果对象里约
- *       4.5 KiB 的诊断报告；而 WiFi/IP 事件回调运行在系统事件任务
- *       （@c CONFIG_ESP_SYSTEM_EVENT_TASK_STACK_SIZE ，本工程 2304 B）上，并且该任务
+ *       @c Inst 构造函数内部的 @c Settings 临时对象与密钥派生；而 WiFi/IP 事件回调运行在
+ *       系统事件任务（@c CONFIG_ESP_SYSTEM_EVENT_TASK_STACK_SIZE ，本工程 2304 B）上，
+ *       并且该任务
  *       是所有 WiFi/IP/其他组件事件共享的分发器。直接在回调里初始化必然栈溢出，且会
  *       阻塞别人的事件；再加上 @c netifapi_* 会同步阻塞到 TCPIP 线程，还有与事件循环
  *       互等的风险。因此回调只做一次 @c xTaskCreate ，重活交给 @ref kStartTaskStack 。

@@ -1,6 +1,6 @@
 /**
  * @file config.cpp
- * @brief @ref et::Settings 的补齐逻辑、@ref et::ConfigReport 诊断，以及解析助手
+ * @brief @ref et::Settings 的补齐逻辑与解析助手
  *        （IPv4/CIDR/UUID/主机名/入口 URI）。
  */
 #include "config/config.hpp"
@@ -100,37 +100,6 @@ void zeroize_string(std::string& text) noexcept {
     }
     text.clear();
     std::string().swap(text);
-}
-
-// ---------------------------------------------------------------------------
-// ConfigReport：诊断
-// ---------------------------------------------------------------------------
-
-/** @brief 清空诊断报告。 */
-void ConfigReport::clear() noexcept {
-    count = 0;
-    omitted_count = 0;
-    for (ConfigDiagnostic& d : items) {
-        d = ConfigDiagnostic{};
-    }
-}
-
-/** @brief 追加一条诊断；只记录字段路径，不记录取值。 */
-void ConfigReport::add(ConfigIssue issue, uint32_t line, uint32_t column,
-                       std::string_view key) noexcept {
-    if (count >= kMaxDiagnostics) {
-        ++omitted_count;
-        return;
-    }
-    ConfigDiagnostic& d = items[count++];
-    d.issue = issue;
-    d.line = line;
-    d.column = column;
-    const size_t n = key.size() < kMaxDiagnosticKey ? key.size() : kMaxDiagnosticKey - 1;
-    for (size_t i = 0; i < n; ++i) {
-        d.key[i] = key[i];
-    }
-    d.key[n] = '\0';
 }
 
 // ---------------------------------------------------------------------------

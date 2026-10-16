@@ -202,23 +202,12 @@ void start_easytier() {
     et::RuntimeOptions runtime_options{};
     runtime_options.on_event = &on_easytier_event;
     // 构造即初始化：TOML 解析、身份补齐、结构校验与资源分配都在构造函数里完成，
-    // 析构时自动停止并释放。
+    // 析构时自动停止并释放。解析失败/被忽略字段的细节已由组件直接输出日志。
     g_inst.emplace(toml, runtime_options);
-    const et::ConfigReport& report = g_inst->report();
     if (!g_inst->valid()) {
         ESP_LOGE(kTag, "easytier config rejected: 0x%x", g_inst->last_error());
-        for (size_t i = 0; i < report.count; ++i) {
-            const et::ConfigDiagnostic& d = report.items[i];
-            ESP_LOGE(kTag, "config issue %d key=%s line=%u column=%u",
-                     static_cast<int>(d.issue), d.key.data(), static_cast<unsigned>(d.line),
-                     static_cast<unsigned>(d.column));
-        }
         g_inst.reset();
         return;
-    }
-    // 被忽略但不影响使用的配置项以警告形式列出，便于排查"配置没生效"。
-    for (size_t i = 0; i < report.count; ++i) {
-        ESP_LOGW(kTag, "ignored config: key=%s", report.items[i].key.data());
     }
 
     log_effective_config();

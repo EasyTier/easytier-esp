@@ -3,10 +3,10 @@
  * @brief TOML 配置映射实现（基于 vendored tomlc17）。
  *
  * @details 关键点：
- * - 解析器的全局 allocator 被替换为"累计字节预算"分配器，超过预算立即失败，
- *   从而把语法树内存占用变成硬上限；
+ * - 使用 tomlc17 默认分配器（不做堆预算），分配失败由解析器以 "out of memory" 报错；
  * - 解析前后分别做嵌套深度预扫描与语法树结构校验，拒绝异常放大；
- * - 支持字段与上游同名同义，未实现字段一律"忽略 + 诊断"，不因未知内容拒绝配置。
+ * - 支持字段与上游同名同义，未实现字段用 Warn 日志"忽略"说明，不因未知内容拒绝配置；
+ *   真正的失败（语法错误、入口非法、资源超限）用 Error 日志 + 返回错误码，**不缓存诊断**。
  */
 #include "config/toml.hpp"
 
@@ -56,18 +56,21 @@ void ensure_parser_options() noexcept {
 }
 
 /**
- * @brief 追加一条诊断（带源码位置）。
- * @note 只记录字段路径，绝不记录取值，避免密钥/私钥泄漏到日志或界面。
+ * @brief 记录一条被忽略的配置项（Warn 级，只记录字段路径，绝不记录取值）。
+ * @param prefix 字段路径前缀（如 "flags."、"network_identity."，可为空）
+ * @param name 字段名
+ * @param at 该字段在 TOML 中的位置（用于行号；0 表示未知）
  */
-void add_diag(ConfigReport& report, ConfigIssue issue, const toml_datum_t& at,
-              std::string_view key) noexcept {
-    report.add(issue, at.lineno > 0 ? static_cast<uint32_t>(at.lineno) : 0,
-               at.colno > 0 ? static_cast<uint32_t>(at.colno) : 0, key);
-}
-
-/** @brief 追加一条无位置的诊断（用于整表/整体忽略）。 */
-void add_diag(ConfigReport& report, ConfigIssue issue, std::string_view key) noexcept {
-    report.add(issue, 0, 0, key);
+void log_ignored(std::string_view prefix, std::string_view name,
+                 const toml_datum_t& at) noexcept {
+    if (at.lineno > 0) {
+        ET_LOGW(kTag, "ignored config: %.*s%.*s (line %d)",
+                static_cast<int>(prefix.size()), prefix.data(),
+                static_cast<int>(name.size()), name.data(), at.lineno);
+    } else {
+        ET_LOGW(kTag, "ignored config: %.*s%.*s", static_cast<int>(prefix.size()),
+                prefix.data(), static_cast<int>(name.size()), name.data());
+    }
 }
 
 /** @brief 取字符串类型 datum 的视图；非字符串返回空视图。 */
@@ -86,28 +89,6 @@ void add_diag(ConfigReport& report, ConfigIssue issue, std::string_view key) noe
         return {};
     }
     return {key, static_cast<size_t>(len)};
-}
-
-/**
- * @brief 拼接 "prefix.name" 形式的字段路径。
- * @param buf 调用方提供的栈缓冲
- * @return 指向 buf 的视图
- */
-[[nodiscard]] std::string_view join_key(char* buf, size_t cap, std::string_view prefix,
-                                        std::string_view name) noexcept {
-    size_t n = 0;
-    auto append = [&](std::string_view s) {
-        for (const char c : s) {
-            if (n + 1 >= cap) {
-                break;
-            }
-            buf[n++] = c;
-        }
-    };
-    append(prefix);
-    append(name);
-    buf[n] = '\0';
-    return {buf, n};
 }
 
 /** @brief 语法树规模统计结果。 */
@@ -155,35 +136,31 @@ void count_tree(const toml_datum_t& node, size_t depth, TreeStats& stats) noexce
 }
 
 /**
- * @brief 宽容读取可选字符串：类型或容量不匹配只记录忽略，绝不覆盖默认值。
- * @note 定长 C 字符串无法表示内嵌 NUL；这类合法 TOML 字符串也按不可采用处理。
+ * @brief 宽容读取可选字符串：类型不匹配只记日志忽略，绝不覆盖默认值。
+ * @note 字段路径无法表示内嵌 NUL；这类合法 TOML 字符串也按不可采用处理。
  */
-std::string_view optional_string(ConfigReport& report, const toml_datum_t& top,
-                                  const char* key) noexcept {
+std::string_view optional_string(const toml_datum_t& top, const char* key) noexcept {
     const toml_datum_t datum = et_toml_get(top, key);
     if (datum.type == TOML_UNKNOWN) return {};
     if (datum.type != TOML_STRING || datum_sv(datum).find('\0') != std::string_view::npos) {
-        add_diag(report, ConfigIssue::IgnoredParameter, datum, key);
+        log_ignored({}, key, datum);
         return {};
     }
     return datum_sv(datum);
 }
 
 /** @brief 按上游字段名提取网络身份；缺失或不能采用的字段分别保留默认值。 */
-esp_err_t map_network_identity(const toml_datum_t& top, Settings& out,
-                               ConfigReport& report) noexcept {
+esp_err_t map_network_identity(const toml_datum_t& top, Settings& out) noexcept {
     const toml_datum_t table = et_toml_get(top, "network_identity");
     if (table.type == TOML_UNKNOWN) return ESP_OK;
     if (table.type != TOML_TABLE) {
-        add_diag(report, ConfigIssue::IgnoredParameter, table, "network_identity");
+        log_ignored({}, "network_identity", table);
         return ESP_OK;
     }
     for (int32_t i = 0; i < table.u.tab.size; ++i) {
         const std::string_view name = table_key(table, i);
         const toml_datum_t datum = table.u.tab.value[i];
         const std::string_view value = datum_sv(datum);
-        std::array<char, kMaxDiagnosticKey> path{};
-        const auto full = join_key(path.data(), path.size(), "network_identity.", name);
         bool adopted = false;
         if (datum.type == TOML_STRING && value.find('\0') == std::string_view::npos) {
             if (name == "network_name" && !value.empty()) {
@@ -194,17 +171,17 @@ esp_err_t map_network_identity(const toml_datum_t& top, Settings& out,
                 adopted = true;
             }
         }
-        if (!adopted) add_diag(report, ConfigIssue::IgnoredParameter, datum, full);
+        if (!adopted) log_ignored("network_identity.", name, datum);
     }
     return ESP_OK;
 }
 
 /** @brief 严格读取 TCP 入口；条目数量无固定上限，错误或不支持的取值仍拒绝加载。 */
-esp_err_t map_peers(const toml_datum_t& top, Settings& out, ConfigReport& report) noexcept {
+esp_err_t map_peers(const toml_datum_t& top, Settings& out) noexcept {
     const toml_datum_t array = et_toml_get(top, "peer");
     if (array.type == TOML_UNKNOWN) return ESP_OK;
     if (array.type != TOML_ARRAY) {
-        add_diag(report, ConfigIssue::InvalidValue, array, "peer");
+        ET_LOGE(kTag, "peer must be an array of tables");
         return ESP_ERR_INVALID_ARG;
     }
     // 入口数量不设固定上限：按数组实际长度一次预留到堆上（std::vector 分配失败即终止）。
@@ -214,24 +191,21 @@ esp_err_t map_peers(const toml_datum_t& top, Settings& out, ConfigReport& report
     for (int32_t i = 0; i < array.u.arr.size; ++i) {
         const toml_datum_t entry = array.u.arr.elem[i];
         if (entry.type != TOML_TABLE) {
-            add_diag(report, ConfigIssue::InvalidValue, entry, "peer");
+            ET_LOGE(kTag, "peer[%d] must be a table", static_cast<int>(i));
             return ESP_ERR_INVALID_ARG;
         }
         for (int32_t k = 0; k < entry.u.tab.size; ++k) {
             const auto name = table_key(entry, k);
             if (name == "uri") continue;
-            std::array<char, kMaxDiagnosticKey> path{};
-            add_diag(report, ConfigIssue::IgnoredParameter, entry.u.tab.value[k],
-                     join_key(path.data(), path.size(), "peer.", name));
+            log_ignored("peer.", name, entry.u.tab.value[k]);
         }
         const toml_datum_t uri = et_toml_get(entry, "uri");
         std::string_view host{};
         uint16_t port = 0;
         if (uri.type != TOML_STRING || datum_sv(uri).find('\0') != std::string_view::npos ||
             !parse_peer_endpoint(datum_sv(uri), host, port)) {
-            add_diag(report, uri.type == TOML_UNKNOWN ? ConfigIssue::MissingRequiredValue
-                                                       : ConfigIssue::InvalidValue,
-                     uri.type == TOML_UNKNOWN ? entry : uri, "peer.uri");
+            ET_LOGE(kTag, "peer[%d].uri is missing or not a supported tcp:// endpoint",
+                    static_cast<int>(i));
             return ESP_ERR_INVALID_ARG;
         }
         PeerEndpoint endpoint{};
@@ -243,11 +217,11 @@ esp_err_t map_peers(const toml_datum_t& top, Settings& out, ConfigReport& report
 }
 
 /** @brief 仅采用有效 MTU；不支持的 flags 无论取值类型如何都只忽略。 */
-void map_flags(const toml_datum_t& top, Settings& out, ConfigReport& report) noexcept {
+void map_flags(const toml_datum_t& top, Settings& out) noexcept {
     const toml_datum_t flags = et_toml_get(top, "flags");
     if (flags.type == TOML_UNKNOWN) return;
     if (flags.type != TOML_TABLE) {
-        add_diag(report, ConfigIssue::IgnoredParameter, flags, "flags");
+        log_ignored({}, "flags", flags);
         return;
     }
     for (int32_t i = 0; i < flags.u.tab.size; ++i) {
@@ -270,14 +244,12 @@ void map_flags(const toml_datum_t& top, Settings& out, ConfigReport& report) noe
             datum_sv(datum) == "aes-gcm") continue;
         if (name == "data_compress_algo" && datum.type == TOML_STRING &&
             datum_sv(datum) == "None") continue;
-        std::array<char, kMaxDiagnosticKey> path{};
-        add_diag(report, ConfigIssue::IgnoredParameter, datum,
-                 join_key(path.data(), path.size(), "flags.", name));
+        log_ignored("flags.", name, datum);
     }
 }
 
 /** @brief 按上游 DhcpConfig 语义提取布尔或 IPv4 CIDR；无法采用时保留默认 false。 */
-void map_dhcp(const toml_datum_t& top, Settings& out, ConfigReport& report) noexcept {
+void map_dhcp(const toml_datum_t& top, Settings& out) noexcept {
     const toml_datum_t datum = et_toml_get(top, "dhcp");
     if (datum.type == TOML_UNKNOWN) return;
     if (datum.type == TOML_BOOLEAN) {
@@ -297,7 +269,7 @@ void map_dhcp(const toml_datum_t& top, Settings& out, ConfigReport& report) noex
             return;
         }
     }
-    add_diag(report, ConfigIssue::IgnoredParameter, datum, "dhcp");
+    log_ignored({}, "dhcp", datum);
 }
 
 }  // namespace
@@ -397,19 +369,19 @@ bool toml_scan_limits(std::string_view text) noexcept {
 /**
  * @brief 解析并映射 TOML 文本。
  *
- * @details 处理顺序：清空报告 → 长度/深度限额 → 预算内解析 → 语法树结构校验 →
- *          根级未知键诊断 → 宽容逐字段提取 → dhcp/ipv4 优先级收敛 → 释放语法树。
- *          调用方（@ref et::Inst 的构造函数）总是从缺省构造的 @ref Settings 开始，
- *          因此这里等价于"缺省值 + TOML"。字段不能采用时只记录忽略；任何失败路径都会
- *          释放语法树并关闭预算标记。
+ * @details 处理顺序：深度限额 → 解析 → 语法树结构校验 → 根级未知键日志 → 宽容逐字段提取
+ *          → dhcp/ipv4 优先级收敛 → 释放语法树。调用方（@ref et::Inst 的构造函数）总是从
+ *          缺省构造的 @ref Settings 开始，因此这里等价于"缺省值 + TOML"。
+ *          **不缓存诊断**：不能采用的非 peer 字段用 Warn 日志记录，真正失败（语法错误、
+ *          入口非法、资源超限）用 Error 日志记录并返回错误码。
  */
-esp_err_t parse_toml_into(Settings& out, ConfigReport& report, std::string_view text) noexcept {
+esp_err_t parse_toml_into(Settings& out, std::string_view text) noexcept {
     // ESP-IDF EMBED_TXTFILES 的结束符属于容器而非 TOML；只移除末尾一个 NUL，
     // 文档内部 NUL 仍交给语法解析器拒绝，绝不按 strlen 截断隐藏后续内容。
     if (!text.empty() && text.back() == '\0') text.remove_suffix(1);
     if (text.empty()) return ESP_OK;  // 上游空文档使用默认配置
     if (!toml_scan_limits(text)) {
-        add_diag(report, ConfigIssue::ResourceLimit, "toml");
+        ET_LOGE(kTag, "TOML nesting or dotted-key depth exceeds the limit");
         return ESP_ERR_NO_MEM;
     }
 
@@ -429,15 +401,11 @@ esp_err_t parse_toml_into(Settings& out, ConfigReport& report, std::string_view 
         // 只提取位置，不回显解析器原始错误文本（其中可能带配置值或密钥）。
         int error_line = 0;
         (void)std::sscanf(result.errmsg, "(line %d)", &error_line);
-        toml_datum_t location{};
-        location.lineno = error_line;
         const bool resource_error =
             std::strstr(result.errmsg, "out of memory") != nullptr ||
             std::strstr(result.errmsg, "too many key parts") != nullptr ||
             std::strstr(result.errmsg, "stack overflow") != nullptr;
         et_toml_free(result);
-        add_diag(report, resource_error ? ConfigIssue::ResourceLimit : ConfigIssue::SyntaxError,
-                 location, "toml");
         if (resource_error) {
             ET_LOGE(kTag, "TOML parser out of resource (allocation or nesting limits)");
             return ESP_ERR_NO_MEM;
@@ -451,7 +419,7 @@ esp_err_t parse_toml_into(Settings& out, ConfigReport& report, std::string_view 
 
     esp_err_t err = ESP_OK;
     if (!stats.ok) {
-        add_diag(report, ConfigIssue::ResourceLimit, "toml");
+        ET_LOGE(kTag, "TOML syntax tree exceeds the size limits");
         err = ESP_ERR_NO_MEM;
     }
 
@@ -463,25 +431,25 @@ esp_err_t parse_toml_into(Settings& out, ConfigReport& report, std::string_view 
             if (is_known_root_key(key)) {
                 continue;
             }
-            add_diag(report, ConfigIssue::IgnoredParameter, top.u.tab.value[i], key);
+            log_ignored({}, key, top.u.tab.value[i]);
         }
     }
 
     if (err == ESP_OK) {
-        auto value = optional_string(report, top, "instance_name");
+        auto value = optional_string(top, "instance_name");
         if (!value.empty()) {
             out.instance_name = value;
             // 显式给出的实例名优先于"取 hostname"的默认推导。
             out.instance_name_explicit = true;
         }
-        value = optional_string(report, top, "hostname");
+        value = optional_string(top, "hostname");
         if (!value.empty()) {
             normalize_hostname(value, out.hostname);
             if (out.hostname.empty()) {
-                add_diag(report, ConfigIssue::IgnoredParameter, "hostname");
+                ET_LOGW(kTag, "ignored config: hostname (empty after normalization)");
             }
         }
-        value = optional_string(report, top, "instance_id");
+        value = optional_string(top, "instance_id");
         if (!value.empty()) {
             // 解析失败可能已经写入部分字节；只有完整有效时才提交。
             std::array<uint8_t, 16> parsed{};
@@ -489,35 +457,35 @@ esp_err_t parse_toml_into(Settings& out, ConfigReport& report, std::string_view 
                 out.instance_id = parsed;
                 out.has_instance_id = true;
             } else {
-                add_diag(report, ConfigIssue::IgnoredParameter, "instance_id");
+                ET_LOGW(kTag, "ignored config: instance_id (not a valid UUID)");
             }
         }
-        value = optional_string(report, top, "ipv4");
+        value = optional_string(top, "ipv4");
         if (!value.empty()) {
             uint32_t addr = 0;
             uint8_t prefix = 24;
             bool had_prefix = false;
             if (!parse_ipv4_cidr(value, addr, prefix, had_prefix)) {
-                add_diag(report, ConfigIssue::IgnoredParameter, "ipv4");
+                ET_LOGW(kTag, "ignored config: ipv4 (not a valid IPv4/CIDR)");
             } else {
                 out.has_static_ipv4 = true;
                 out.static_ipv4 = addr;
                 out.static_prefix = (had_prefix && prefix != 32) ? prefix : 24;
                 if (had_prefix && prefix == 32) {
-                    add_diag(report, ConfigIssue::IgnoredParameter, "ipv4.prefix");
+                    ET_LOGW(kTag, "ignored config: ipv4.prefix (/32 normalized to /24)");
                 }
             }
         }
         if (err == ESP_OK) {
-            err = map_network_identity(top, out, report);
+            err = map_network_identity(top, out);
         }
         if (err == ESP_OK) {
-            map_flags(top, out, report);
-            map_dhcp(top, out, report);
-            err = map_peers(top, out, report);
+            map_flags(top, out);
+            map_dhcp(top, out);
+            err = map_peers(top, out);
         }
         if (out.has_static_ipv4 && out.dhcp) {
-            add_diag(report, ConfigIssue::IgnoredParameter, "dhcp");
+            ET_LOGW(kTag, "ignored config: dhcp (ipv4 is configured, static address wins)");
             out.dhcp = false;
             out.dhcp_has_subnet = false;
         }

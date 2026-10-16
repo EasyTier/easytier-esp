@@ -41,7 +41,7 @@ constexpr const char* kTag = "ET.INSTANCE";
 
 // 单个实例的常驻内存必须保持有界：Context 在堆上分配（大于 16 KiB 的分配会走
 // PSRAM），但仍要有上限，避免后续加入功能时悄悄膨胀。实测组成（ESP32-S3，字节）：
-//   Context 合计 92800（不再包含 4.5 KiB 的解析诊断报告，报告由 Inst 自己持有）
+//   Context 合计 92800（不含解析诊断：诊断已改为直接写日志，不再缓存报告）
 //     ├─ RpcReassembler（2 槽 × (8 KiB 收包 + 8 KiB 有序缓冲)）33184
 //     ├─ SyncEngine（Topology 22928 + 2 个 ConnList 8968 + 快照 524 + 编码缓冲）35240
 //     ├─ RPC 收发缓冲（body 8 KiB + service 4 KiB + 其它）约 14000
@@ -283,15 +283,15 @@ void destroy_queues(Context& ctx) noexcept { (void)ctx; }
 
 /**
  * @brief 构造实例：解析 TOML → 补齐身份 → 校验结构 → 堆上分配上下文并派生密钥。
- * @note 组件禁用异常，构造不能返回错误码；失败时对象 valid()==false，
- *       错误码见 last_error()、诊断见 report()，析构对失败对象安全。
+ * @note 组件禁用异常，构造不能返回错误码；失败时对象 valid()==false、错误码见
+ *       last_error()，具体错误/被忽略的字段已由 toml.cpp 直接输出日志（不缓存诊断），
+ *       析构对失败对象安全。
  */
 Inst::Inst(std::string_view toml, const RuntimeOptions& options) noexcept {
-    report_.clear();
     // 从缺省构造的设置开始：缺省值由 Settings 的成员初始化器给出，因此这里天然是
     // "全量替换"语义，不需要额外的复位步骤。
     Settings settings{};
-    last_error_ = parse_toml_into(settings, report_, toml);
+    last_error_ = parse_toml_into(settings, toml);
     // 即使解析失败也补齐身份，保证错误信息里能看到实例名/hostname。
     settings.finalize_identity();
     if (last_error_ != ESP_OK) {

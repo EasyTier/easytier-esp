@@ -7,10 +7,11 @@
  * - **只有一个公开类 @ref et::Inst**：用 TOML 文本构造即完成全部设置（组件**不接受
  *   文件路径**，应用自己读取文件后把文本交给构造函数），析构即停止任务并释放资源。
  * - 没有独立的配置类：全部设置项都是 @ref et::Inst 的私有实现细节，应用只能在构造后
- *   通过 @ref et::Inst::report / @ref et::Inst::get_config_info 读取诊断快照。
+ *   通过 @ref et::Inst::get_config_info 读取生效配置快照。
  * - **允许多个实例并存**（组件内部没有全局单实例状态）。
- * - 配置格式与上游 EasyTier 核心保持一致（TOML），无法实现的参数会被忽略并
- *   通过 @ref et::ConfigReport 报告，而不是直接判定配置非法。
+ * - 配置格式与上游 EasyTier 核心保持一致（TOML）：无法采用的非 peer 字段用 Warn 日志
+ *   说明并忽略；解析失败用 Error 日志说明并通过 @ref et::Inst::last_error 返回错误码
+ *   （**不缓存诊断**）。
  * - 组件不初始化 WiFi、不挂载文件系统、不修改物理默认网卡，这些由应用负责。
  *
  * @note 首版仅适配 ESP-IDF 6.1.x。
@@ -51,52 +52,6 @@ inline constexpr std::string_view kDefaultNetworkName = "default";
  *       完整数量见 @ref ConfigInfo::peer_total_count 。
  */
 inline constexpr size_t kConfigInfoMaxPeers = 16;
-/** @brief @ref ConfigReport 能携带的最大诊断条数。 */
-inline constexpr size_t kMaxDiagnostics = 32;
-/** @brief 每条诊断记录的字段路径最大长度（含结尾 '\0'）。 */
-inline constexpr size_t kMaxDiagnosticKey = 128;
-
-// ---------------------------------------------------------------------------
-// 配置诊断
-// ---------------------------------------------------------------------------
-
-/** @brief 配置诊断类别。 */
-enum class ConfigIssue : uint8_t {
-    IgnoredParameter,      ///< 合法但未实现的参数/表，已忽略
-    SyntaxError,           ///< TOML 语法错误
-    InvalidValue,          ///< 已支持字段的取值非法
-    MissingRequiredValue,  ///< 缺少必需字段
-    ResourceLimit,         ///< 超出文本长度/嵌套深度/节点数/内存预算等容量限制
-};
-
-/** @brief 单条配置诊断，只记录字段路径，不记录任何敏感取值。 */
-struct ConfigDiagnostic {
-    ConfigIssue issue = ConfigIssue::IgnoredParameter;  ///< 诊断类别
-    uint32_t line = 0;                                  ///< 行号，0 表示未知
-    uint32_t column = 0;                                ///< 列号，0 表示未知
-    std::array<char, kMaxDiagnosticKey> key{};          ///< 字段路径，如 "flags.mtu"
-};
-
-/**
- * @brief 配置加载报告。
- *
- * @note 该结构约 4.5 KiB；超过 @ref kMaxDiagnostics 条的诊断会被计数到
- *       @ref omitted_count，不会因为报告容量不足而拒绝配置。
- */
-struct ConfigReport {
-    std::array<ConfigDiagnostic, kMaxDiagnostics> items{};  ///< 诊断列表
-    size_t count = 0;                                       ///< items 中有效条数
-    size_t omitted_count = 0;                               ///< 因容量不足被省略的条数
-
-    /** @brief 清空全部诊断（count / omitted_count 归零）。 */
-    void clear() noexcept;
-    /**
-     * @brief 追加一条诊断；超出 @ref kMaxDiagnostics 时只增加 @ref omitted_count 。
-     * @param key 字段路径（只记录路径，绝不记录取值）
-     */
-    void add(ConfigIssue issue, uint32_t line, uint32_t column,
-             std::string_view key) noexcept;
-};
 
 // ---------------------------------------------------------------------------
 // 运行期状态与事件
@@ -228,12 +183,13 @@ struct Context;
  *   派生密钥（不创建任务）。TOML 是唯一配置入口，应用自己读取文件后把文本交给构造函数；
  * - **析构即释放**：若已 @ref start 则先做无限等待的停止，再释放队列/连接/AEAD 并清零密钥；
  * - **设置项没有独立的配置类**：全部字段是实例的私有实现细节，构造后不可修改；应用只能
- *   通过 @ref report / @ref get_config_info 读取诊断快照；
+ *   通过 @ref get_config_info 读取生效配置快照；
  * - **允许多个实例并存**：组件内部没有全局单实例状态，每个对象独占自己的上下文、队列、
  *   任务、socket、虚拟网卡与事件回调。常驻内存、任务与连接槽按实例数量叠加，多实例时
  *   应用需自行避免虚拟 IP/网段冲突；
  * - 不可拷贝、不可移动：任务与回调持有上下文地址；
- * - 组件禁用异常，构造不能返回错误码：用 @ref valid / @ref last_error / @ref report 检查。
+ * - 组件禁用异常，构造不能返回错误码：用 @ref valid / @ref last_error 检查；解析失败与
+ *   被忽略的字段直接输出到日志（Error / Warn），**不缓存诊断**。
  *
  * 典型调用顺序：
  * @code
@@ -242,11 +198,11 @@ struct Context;
  * static std::optional<et::Inst> inst;      // 存储方式由应用决定
  * inst.emplace(kTomlText, options);
  * if (!inst->valid()) {
- *     // 解析/校验失败：report() 里有字段路径级别的诊断
+ *     // 失败原因已由组件以 Error 级日志输出；这里只需要看错误码
+ *     ESP_LOGE(TAG, "easytier init failed: 0x%x", inst->last_error());
  *     inst.reset();
  *     return;
  * }
- * for (size_t i = 0; i < inst->report().count; ++i) { ...打印被忽略的配置项... }
  * ESP_ERROR_CHECK(inst->start());
  * ESP_ERROR_CHECK(inst->set_underlay_ready(true));
  * // 退出前：可直接让对象析构（自动停止并释放），也可先显式 stop() 观察超时。
@@ -258,7 +214,7 @@ struct Context;
  *
  * | 接口 | 可从任意任务调用 | 允许在事件回调中调用 | 说明 |
  * | --- | --- | --- | --- |
- * | @ref get_status / @ref get_config_info / @ref report / @ref last_error | 是 | 是 | 只读原子量与不可变数据，返回副本/引用 |
+ * | @ref get_status / @ref get_config_info / @ref last_error | 是 | 是 | 只读原子量与不可变数据，返回副本 |
  * | @ref set_underlay_ready | 是 | 是 | 非阻塞（队列投递），物理网络事件里直接调用 |
  * | 构造 | 仅初始化阶段（大栈任务） | 否 | 会解析 TOML 并分配上下文 |
  * | @ref start / @ref stop / 析构 | 同一任务串行 | **否** | 会等待任务，见下方死锁说明 |
@@ -274,8 +230,7 @@ struct Context;
  *   入队，因此**在回调内或任意任务中调用都安全**。
  * - `stop()` 正常返回后，任务已全部退出，**不会再产生任何事件回调**；此时才可释放
  *   @ref RuntimeOptions::user_data 指向的对象。
- * - 构造会解析 TOML（递归下降），并且对象自身含约 4.5 KiB 的诊断报告，**不要在小栈任务
- *   （如 WiFi 事件任务）里构造实例**。
+ * - 构造会解析 TOML（递归下降），**不要在小栈任务（如 WiFi 事件任务）里构造实例**。
  */
 class Inst final {
 public:
@@ -283,8 +238,9 @@ public:
      * @brief 用 TOML 文本构造实例（不启动任务）。
      * @param toml TOML 文本，可带 EMBED_TXTFILES 追加的单个末尾 NUL；内部非法 NUL 仍拒绝
      * @param options 事件回调等运行期选项
-     * @note 构造无法返回错误码。失败（TOML 语法/peer 错误、结构校验失败、上下文分配失败）
-     *       时对象 @ref valid 为 false，原因见 @ref last_error ，诊断见 @ref report 。
+     * @note 构造无法返回错误码：失败（TOML 语法/peer 错误、结构校验失败、上下文分配失败）
+     *       时对象 @ref valid 为 false，原因见 @ref last_error ；具体错误已由组件以
+     *       Error 级日志输出，被忽略的字段以 Warn 级日志输出，**不缓存诊断**。
      */
     explicit Inst(std::string_view toml, const RuntimeOptions& options = {}) noexcept;
 
@@ -311,11 +267,6 @@ public:
     }
     /** @brief 构造阶段的错误码；构造成功后的运行期错误见 @ref Status::last_error 。 */
     [[nodiscard]] esp_err_t last_error() const noexcept { return last_error_; }
-    /**
-     * @brief 最近一次 TOML 解析的诊断（构造失败时为出错原因，构造成功时为被忽略的字段）。
-     * @note 返回内部引用，仅在实例存活期间有效；只记录字段路径，不含任何敏感取值。
-     */
-    [[nodiscard]] const ConfigReport& report() const noexcept { return report_; }
 
     /**
      * @brief 启动实例（异步）。
@@ -362,7 +313,6 @@ public:
 private:
     Context* ctx_ = nullptr;    ///< 堆上的运行上下文（92,800 B ≈ 91 KiB，建议启用 PSRAM）
     bool started_ = false;      ///< 是否已 @ref start
-    ConfigReport report_{};     ///< 最近一次 TOML 解析诊断（约 4.5 KiB）
     esp_err_t last_error_ = ESP_ERR_INVALID_STATE;  ///< 构造阶段错误码
 };
 

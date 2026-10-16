@@ -33,7 +33,7 @@
   （构造=解析 TOML+校验+分配+派生密钥，析构=自动停止并释放；**允许并存多个实例**）；
 - **唯一的公开类 `et::Inst`**：没有独立的配置类，全部设置项都是实例私有实现
   （内部 `Settings`：`std::string`/`std::vector`，缺省值 + TOML 全量替换）、身份补齐
-  （hostname→instance_name、随机 UUID v4）、解析错误与诊断由 `report()` 持有；
+  （hostname→instance_name、随机 UUID v4）；解析失败与忽略项直接输出日志，不缓存诊断；
 - `SyncEngine`：路由同步的全部纯逻辑（拓扑合并、最短路、dhcp、请求/响应编解码）
   与任务解耦，因此**可以在宿主测试里让多个引擎互相对话**，验证两节点互通与
   A—B—C 经中继收敛；
@@ -112,17 +112,19 @@ Kconfig 的 `EASYTIER_ESP_MAX_CONNECTED_PEERS` 决定（默认 6），其余入�
 注意 `inst.get_config_info()` 返回的**诊断快照**仍是定长缓冲（实例名/主机名/网络名
 各 64 字节、入口文本 200 字节），超长取值在快照里会被截断——它只用于日志，不影响生效配置。
 
-TOML 语法错误、peer 配置错误或解析长度/深度/内存预算耗尽会让 **`et::Inst` 构造失败**
-（`valid()==false`，错误码见 `inst.last_error()`，字段路径见 `inst.report()`）。
+TOML 语法错误、peer 配置错误或解析嵌套/语法树超限会让 **`et::Inst` 构造失败**
+（`valid()==false`，错误码见 `inst.last_error()`）。失败原因由组件以 **Error 级日志**
+直接输出（含出错行号或字段路径），**不做缓存**。
 空文档、无关字段、缺少入口或虚拟地址都可以解析；解析成功不代表组网成功——入口与虚拟地址的
-结构校验同样在构造时执行。TOML 解析使用进程级预算与分配器，因此**构造必须串行调用**
+结构校验同样在构造时执行。TOML 解析使用进程级解析器选项，因此**构造必须串行调用**
 （不能跨任务并发构造）；并发解析会被直接拒绝并返回 `ESP_ERR_INVALID_STATE`。
 
 字段名、层级、默认网络身份、IPv4 /32→/24、DHCP 布尔/CIDR 形式参考上游
 `easytier-core/src/config/toml.rs`。ESP 端按需求对字段转换采用更宽容的策略，
 不会套用上游所有结构体的强类型反序列化约束。
 
-忽略项通过 `inst.report()`（`et::ConfigReport`）返回（只记录字段路径，不含任何密钥取值）。
+无法采用的**非 peer 字段**（未知键、类型错误、取值非法）以 **Warn 级日志**列出字段路径后
+忽略，只记录路径、不含任何密钥取值。
 
 `dhcp` 接受布尔或 IPv4 CIDR 字符串（前缀 0..=30）；配置了静态 `ipv4` 时 `dhcp` 被忽略。
 
@@ -183,7 +185,6 @@ DHCP 网卡创建/改址成功后同步更新公开 IPv4/前缀，再发送 Netw
 #include <string_view>
 
 // 示例只创建一个实例；组件本身支持多个 Inst 并存。
-// Inst 含约 4.5 KiB 诊断报告，放静态区避免占用小栈任务。
 static std::optional<et::Inst> inst;
 
 extern const uint8_t easytier_toml_start[] asm("_binary_easytier_toml_start");
@@ -195,11 +196,11 @@ void start_easytier() {
 
     et::RuntimeOptions options{};
     options.on_event = &on_easytier_event;
-    // 构造即初始化（TOML 解析 + 校验 + 分配）。组件禁用异常：失败通过 valid()/report() 查询。
+    // 构造即初始化（TOML 解析 + 校验 + 分配）。组件禁用异常：失败通过 valid()/last_error()
+    // 查询；解析失败原因与忽略项已由组件直接写入日志（Error / Warn）。
     inst.emplace(std::string_view(reinterpret_cast<const char*>(easytier_toml_start), len),
                  options);
-    if (!inst->valid()) { /* 看 inst->last_error() 与 inst->report() */ inst.reset(); return; }
-    for (size_t i = 0; i < inst->report().count; ++i) { /* 打印被忽略的字段路径 */ }
+    if (!inst->valid()) { /* 看 inst->last_error() */ inst.reset(); return; }
     if (inst->start() != ESP_OK) { inst.reset(); return; }
     // 物理网络取得 IP 后通知组件；断网时传 false。
     (void)inst->set_underlay_ready(true);
@@ -224,8 +225,8 @@ void start_easytier() {
   因此**随机生成的缺省值每次都会重新生成**——TOML 里没写 `instance_id` 时每次构造都会得到
   新的 UUID v4；`hostname` 回退 `Espressif`，`instance_name` 按 hostname 推导。
   TOML 里显式给出的 `instance_name` / `instance_id` 仍然优先。
-- 设置项全部是 `Inst` 的私有成员，应用无法直接读写；可读的是诊断快照：
-  `report()`（解析诊断）与 `get_config_info()`（生效配置快照，不含网络密钥）。
+- 设置项全部是 `Inst` 的私有成员，应用无法直接读写；可读的只有 `get_config_info()`
+  返回的生效配置快照（不含网络密钥）；解析诊断不缓存，直接进日志。
 
 生命周期约定：
 
@@ -254,7 +255,7 @@ tomlc17 自身以 "out of memory" 报错并映射为 `ESP_ERR_NO_MEM`。仍然�
 
 | 接口 | 可从任意任务 | 可在事件回调中 | 说明 |
 | --- | --- | --- | --- |
-| `inst.report` / `last_error` | 是 | 是 | 只读构造阶段的诊断数据 |
+| `inst.last_error` | 是 | 是 | 只读构造阶段的错误码 |
 | `inst.get_status` / `get_config_info` | 是 | 是 | 只读原子量与不可变数据，返回副本 |
 | `inst.set_underlay_ready` | 是 | 是 | 非阻塞（队列投递），物理网络事件里直接调用 |
 | `et::Inst` 构造 | 仅初始化阶段（大栈任务，串行） | 否 | 解析 TOML 并分配约 91 KiB 上下文 |
@@ -300,7 +301,7 @@ tomlc17 自身以 "out of memory" 报错并映射为 `ESP_ERR_NO_MEM`。仍然�
 | 项目 | 大小 | 说明 |
 | --- | --- | --- |
 | `Context`（堆） | 92,800 B | RPC 重组 33,184（2 槽 × 16 KiB）+ `SyncEngine` 35,240（拓扑 22,928 + 邻接表 8,968 + 快照 524 + 编码缓冲）+ RPC 收发缓冲约 14,000 + `Settings` 外壳 + 其它 |
-| `Inst` 对象本体 | 约 4.5 KiB | 私有 `Context*` + `bool started_` + `ConfigReport`（约 4.5 KiB 解析诊断）；设置项与运行状态在堆上的 `Context` 内 |
+| `Inst` 对象本体 | 约 12 B | 私有 `Context*` + `bool started_` + `esp_err_t last_error_`（诊断不再缓存）；设置项与运行状态在堆上的 `Context` 内 |
 | `Settings` 文本字段（堆） | 按实际长度 | 实例名 / 主机名 / 网络名 / 网络密钥都是 `std::string`（短字段走 SSO），**长度无固定上限** |
 | 入口地址列表（堆） | 每条约 32 B + 主机文本 | `std::vector<PeerEndpoint>`，按配置实际条数分配；条目数量无上限 |
 | 帧队列 `q_rx_ctrl`/`q_tx`/`q_rx_data` | 默认约 47 KiB | 深度各 8（Kconfig `EASYTIER_ESP_QUEUE_*_DEPTH`）× 约 2 KiB；深度可直接换算成常驻内存 |
