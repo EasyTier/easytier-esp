@@ -75,7 +75,7 @@ void send_data_frame(Context& ctx, uint32_t generation, uint32_t to_peer, uint32
     }
     size_t payload_len = 0;
     uint8_t flags = 0;
-    if (ctx.config.enable_encryption) {
+    if (ctx.settings.enable_encryption) {
         if (ctx.data_cipher == nullptr || !ctx.data_cipher->ready()) {
             ctx.dropped.fetch_add(1);
             return;
@@ -133,7 +133,7 @@ void handle_netif_output(Context& ctx, const NetifRxItem& item) noexcept {
         return;
     }
     const Bytes ip_packet(ip_buf, len);
-    if (!ipv4_is_valid(ip_packet, ctx.config.mtu)) {
+    if (!ipv4_is_valid(ip_packet, ctx.settings.mtu)) {
         ctx.dropped.fetch_add(1);
         return;
     }
@@ -182,13 +182,13 @@ void handle_inbound_data(Context& ctx, FrameMessage& frame) noexcept {
                          frame.len - kPeerManagerHeaderSize);
         if (encrypted) {
             // 关闭加密时与上游 NullCipher 一致：明文可收，已加密报文直接拒绝。
-            if (!ctx.config.enable_encryption || ctx.data_cipher == nullptr ||
+            if (!ctx.settings.enable_encryption || ctx.data_cipher == nullptr ||
                 !ctx.data_cipher->ready() || !ctx.data_cipher->decrypt_in_place(payload)) {
                 ctx.dropped.fetch_add(1);
                 return;
             }
         }
-        if (!ipv4_is_valid(payload, ctx.config.mtu)) {
+        if (!ipv4_is_valid(payload, ctx.settings.mtu)) {
             ctx.dropped.fetch_add(1);
             return;
         }

@@ -10,8 +10,8 @@
  * 4. **解析失败**：语法错误或解析资源超限也返回错误。空文档、无入口、无虚拟
  *    地址均可加载，但不保证网络可用。
  *
- * 本函数按字段覆盖 @p out ；**全量替换语义由调用方 @ref Config::init 实现**——它会先
- * 把配置复位为缺省值再调用这里，因此 @p out 中来自上一次配置的取值不会被保留。
+ * 本函数按字段覆盖 @p out ；**全量替换语义由 @ref et::Inst 的构造函数实现**——它总是
+ * 从缺省构造的 @ref Settings 开始，因此 @p out 里不会有上一次配置的取值。
  */
 #pragma once
 
@@ -19,6 +19,7 @@
 #include <string_view>
 
 #include "config/config.hpp"
+#include "config/settings.hpp"
 #include "easytier-esp.h"
 
 namespace et {
@@ -29,12 +30,13 @@ inline constexpr size_t kTomlMaxDepth = 32;
 inline constexpr size_t kTomlMaxKeySegments = 16;
 
 /**
- * @brief 解析 TOML 文本并更新配置。
- * @param out 目标配置；只覆盖 TOML 中出现的字段，诊断与错误记录在 @p out 内
+ * @brief 解析 TOML 文本并更新设置项。
+ * @param out 目标设置；只覆盖 TOML 中出现的字段
+ * @param report 诊断输出；调用时不会清空，由调用方决定是否先 clear()
  * @param text TOML 文本；允许 EMBED_TXTFILES 追加的单个末尾 NUL，内部 NUL 仍非法
- * @return @c ESP_OK / @c ESP_ERR_INVALID_ARG / @c ESP_ERR_NO_MEM
+ * @return @c ESP_OK / @c ESP_ERR_INVALID_ARG / @c ESP_ERR_NO_MEM / @c ESP_ERR_INVALID_STATE
  */
-esp_err_t parse_toml_into(Config& out, std::string_view text) noexcept;
+esp_err_t parse_toml_into(Settings& out, ConfigReport& report, std::string_view text) noexcept;
 
 /**
  * @brief 深度与 dotted key 限额预扫描。

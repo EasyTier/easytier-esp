@@ -4,9 +4,11 @@
  *
  * @details
  * - 公开接口仅提供 C++20 API，不提供 C 包装层；内部实现位于 @c namespace et。
- * - 配置对象是 @ref et::Config：用 TOML 文本构造（或从另一个 @ref et::Config 拷贝），
- *   组件**不再接受文件路径**——应用自己读取文件后把文本交给 @ref et::Config::init 。
- * - 运行期只有**一个全局实例**，接口位于 @c namespace et::Inst，没有实例类。
+ * - **只有一个公开类 @ref et::Inst**：用 TOML 文本构造即完成全部设置（组件**不接受
+ *   文件路径**，应用自己读取文件后把文本交给构造函数），析构即停止任务并释放资源。
+ * - 没有独立的配置类：全部设置项都是 @ref et::Inst 的私有实现细节，应用只能在构造后
+ *   通过 @ref et::Inst::report / @ref et::Inst::get_config_info 读取诊断快照。
+ * - **允许多个实例并存**（组件内部没有全局单实例状态）。
  * - 配置格式与上游 EasyTier 核心保持一致（TOML），无法实现的参数会被忽略并
  *   通过 @ref et::ConfigReport 报告，而不是直接判定配置非法。
  * - 组件不初始化 WiFi、不挂载文件系统、不修改物理默认网卡，这些由应用负责。
@@ -18,7 +20,6 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
-#include <new>
 #include <string_view>
 
 #include "esp_err.h"
@@ -86,363 +87,15 @@ struct ConfigReport {
     std::array<ConfigDiagnostic, kMaxDiagnostics> items{};  ///< 诊断列表
     size_t count = 0;                                       ///< items 中有效条数
     size_t omitted_count = 0;                               ///< 因容量不足被省略的条数
-};
 
-// ---------------------------------------------------------------------------
-// 配置数据
-// ---------------------------------------------------------------------------
-
-/**
- * @brief 拥有的文本缓冲：按实际长度在堆上分配，**长度没有固定上限**。
- *
- * @details 分配失败通过返回值报告而不是异常（组件以 @c -fno-exceptions 编译）；缓冲
- *          始终以 @c '\\0' 结尾，因此 @ref c_str 可以直接当 C 字符串用。只支持移动，
- *          需要深拷贝时用 @ref copy_from 。容量只增不减，重复赋值不会反复分配。
- */
-class TextBuffer {
-public:
-    TextBuffer() noexcept = default;
-    ~TextBuffer() noexcept { release(); }
-
-    TextBuffer(const TextBuffer&) = delete;
-    TextBuffer& operator=(const TextBuffer&) = delete;
-    TextBuffer(TextBuffer&& other) noexcept { move_from(other); }
-    TextBuffer& operator=(TextBuffer&& other) noexcept {
-        if (this != &other) {
-            release();
-            move_from(other);
-        }
-        return *this;
-    }
-
+    /** @brief 清空全部诊断（count / omitted_count 归零）。 */
+    void clear() noexcept;
     /**
-     * @brief 赋值（按实际长度分配）。
-     * @return @c ESP_OK，或 @c ESP_ERR_NO_MEM
+     * @brief 追加一条诊断；超出 @ref kMaxDiagnostics 时只增加 @ref omitted_count 。
+     * @param key 字段路径（只记录路径，绝不记录取值）
      */
-    [[nodiscard]] esp_err_t assign(std::string_view text) noexcept {
-        if (text.size() + 1 > capacity_) {
-            char* fresh = new (std::nothrow) char[text.size() + 1];
-            if (fresh == nullptr) {
-                return ESP_ERR_NO_MEM;
-            }
-            delete[] data_;
-            data_ = fresh;
-            capacity_ = text.size() + 1;
-        }
-        for (size_t i = 0; i < text.size(); ++i) {
-            data_[i] = text[i];
-        }
-        data_[text.size()] = '\0';
-        size_ = text.size();
-        return ESP_OK;
-    }
-
-    /**
-     * @brief 深拷贝另一个缓冲。
-     * @return @c ESP_OK，或 @c ESP_ERR_NO_MEM
-     */
-    [[nodiscard]] esp_err_t copy_from(const TextBuffer& other) noexcept {
-        if (this == &other) {
-            return ESP_OK;
-        }
-        return assign(other.view());
-    }
-
-    /** @brief 文本视图（未赋值时为空视图）。 */
-    [[nodiscard]] std::string_view view() const noexcept {
-        return data_ != nullptr ? std::string_view(data_, size_) : std::string_view{};
-    }
-    /** @brief C 字符串；未赋值时返回指向静态空串的指针，永不返回 nullptr。 */
-    [[nodiscard]] const char* c_str() const noexcept {
-        static constexpr char kEmpty[] = "";
-        return data_ != nullptr ? data_ : kEmpty;
-    }
-    /** @brief 是否为空。 */
-    [[nodiscard]] bool empty() const noexcept { return size_ == 0; }
-    /** @brief 当前长度（不含结尾 NUL）。 */
-    [[nodiscard]] size_t size() const noexcept { return size_; }
-
-    /** @brief 清空内容（保留容量）。 */
-    void clear() noexcept {
-        if (data_ != nullptr) {
-            data_[0] = '\0';
-        }
-        size_ = 0;
-    }
-
-    /** @brief 用 0 覆写内容后再清空，用于擦除密钥等敏感文本。 */
-    void zeroize() noexcept {
-        for (size_t i = 0; i < capacity_; ++i) {
-            data_[i] = '\0';
-        }
-        size_ = 0;
-    }
-
-private:
-    void release() noexcept {
-        delete[] data_;
-        data_ = nullptr;
-        size_ = 0;
-        capacity_ = 0;
-    }
-    void move_from(TextBuffer& other) noexcept {
-        data_ = other.data_;
-        size_ = other.size_;
-        capacity_ = other.capacity_;
-        other.data_ = nullptr;
-        other.size_ = 0;
-        other.capacity_ = 0;
-    }
-
-    char* data_ = nullptr;  ///< 堆缓冲（始终 NUL 结尾）
-    size_t size_ = 0;       ///< 文本长度（不含 NUL）
-    size_t capacity_ = 0;   ///< 缓冲容量（含结尾 NUL）
-};
-
-/** @brief 一个已解析的入口地址。 */
-struct PeerEndpoint {
-    TextBuffer host{};  ///< 主机名或点分 IPv4 文本（长度无固定上限）
-    uint16_t port = 0;  ///< 端口
-};
-
-/**
- * @brief 入口地址列表：按实际条数在堆上分配，因此配置里的入口数量没有固定上限。
- *
- * @details 只支持移动、不支持拷贝（避免隐式的大块拷贝与重复分配）。分配失败通过
- *          返回值报告而不是异常——组件以 @c -fno-exceptions 编译。容量只增不减，
- *          重复解析同一份配置时不会反复分配。
- */
-class PeerEndpointList {
-public:
-    PeerEndpointList() noexcept = default;
-    ~PeerEndpointList() noexcept { release(); }
-
-    PeerEndpointList(const PeerEndpointList&) = delete;
-    PeerEndpointList& operator=(const PeerEndpointList&) = delete;
-    PeerEndpointList(PeerEndpointList&& other) noexcept { move_from(other); }
-    PeerEndpointList& operator=(PeerEndpointList&& other) noexcept {
-        if (this != &other) {
-            release();
-            move_from(other);
-        }
-        return *this;
-    }
-
-    /** @brief 预留至少 @p n 条容量（只增长，不改变 size）。 */
-    [[nodiscard]] esp_err_t reserve(size_t n) noexcept {
-        if (n <= capacity_) {
-            return ESP_OK;
-        }
-        PeerEndpoint* fresh = new (std::nothrow) PeerEndpoint[n];
-        if (fresh == nullptr) {
-            return ESP_ERR_NO_MEM;
-        }
-        for (size_t i = 0; i < size_; ++i) {
-            fresh[i] = std::move(items_[i]);
-        }
-        delete[] items_;
-        items_ = fresh;
-        capacity_ = n;
-        return ESP_OK;
-    }
-
-    /**
-     * @brief 深拷贝另一个列表（拷贝时可能分配失败）。
-     * @return @c ESP_OK，或 @c ESP_ERR_NO_MEM
-     */
-    [[nodiscard]] esp_err_t copy_from(const PeerEndpointList& other) noexcept {
-        clear();
-        const esp_err_t err = reserve(other.size());
-        if (err != ESP_OK) {
-            return err;
-        }
-        for (size_t i = 0; i < other.size(); ++i) {
-            PeerEndpoint endpoint{};
-            const esp_err_t host_err = endpoint.host.copy_from(other.items_[i].host);
-            if (host_err != ESP_OK) {
-                return host_err;
-            }
-            endpoint.port = other.items_[i].port;
-            items_[size_++] = std::move(endpoint);
-        }
-        return ESP_OK;
-    }
-
-    /** @brief 追加一条（移动语义）；调用方需先保证容量足够（见 @ref full ）。 */
-    void push_back(PeerEndpoint&& value) noexcept {
-        if (size_ < capacity_) {
-            items_[size_++] = std::move(value);
-        }
-    }
-
-    /** @brief 清空内容（保留已分配的容量）。 */
-    void clear() noexcept { size_ = 0; }
-    /** @brief 当前条数。 */
-    [[nodiscard]] size_t size() const noexcept { return size_; }
-    /** @brief 首元素指针（可能为 nullptr）。 */
-    [[nodiscard]] const PeerEndpoint* data() const noexcept { return items_; }
-    /** @brief 首元素指针（可能为 nullptr）。 */
-    [[nodiscard]] PeerEndpoint* data() noexcept { return items_; }
-    /** @brief 下标访问（不做越界检查，调用方保证 i < size()）。 */
-    [[nodiscard]] const PeerEndpoint& operator[](size_t i) const noexcept { return items_[i]; }
-    /** @brief 下标访问（不做越界检查，调用方保证 i < size()）。 */
-    [[nodiscard]] PeerEndpoint& operator[](size_t i) noexcept { return items_[i]; }
-
-private:
-    void release() noexcept {
-        delete[] items_;
-        items_ = nullptr;
-        size_ = 0;
-        capacity_ = 0;
-    }
-    void move_from(PeerEndpointList& other) noexcept {
-        items_ = other.items_;
-        size_ = other.size_;
-        capacity_ = other.capacity_;
-        other.items_ = nullptr;
-        other.size_ = 0;
-        other.capacity_ = 0;
-    }
-
-    PeerEndpoint* items_ = nullptr;  ///< 堆缓冲
-    size_t size_ = 0;                ///< 有效条数
-    size_t capacity_ = 0;            ///< 已分配容量
-};
-
-/**
- * @brief 生效的 EasyTier 配置。
- *
- * @details 配置**数据**是公开成员，便于应用直接检查"实际生效的值"；配置的**来源**
- *          与**错误**由本类统一管理：
- *          - 用 TOML 文本构造 / @ref init 解析（解析失败不会破坏已有取值，详见 @ref init）；
- *          - 构造与解析完成时会补齐实例身份（见 @ref finalize_identity ）；
- *          - 解析诊断与错误码保存在对象内，通过 @ref report / @ref last_error 读取。
- *
- *          数据成员中的定长 C 字符串一律以 @c '\\0' 结尾；IPv4 以"四段字节按大端组成
- *          的数值"保存（例如 10.144.144.10 = 0x0A90900A），与 protobuf Ipv4Addr 一致。
- *
- * @note 本类不持有任何运行期资源，拷贝是安全的（入口列表为深拷贝，失败时把错误记录在
- *       副本的 @ref last_error 中）。
- */
-class Config {
-public:
-    /**
-     * @brief 构造缺省配置。
-     * @details 身份在构造时就补齐：hostname 回退 @ref kDefaultHostname ，
-     *          instance_name 取 hostname，instance_id 生成随机 UUID v4。
-     */
-    Config() noexcept;
-
-    /** @brief 拷贝构造：入口列表深拷贝；分配失败时副本记录 @c ESP_ERR_NO_MEM 。 */
-    Config(const Config& other) noexcept;
-    /** @brief 拷贝赋值；语义同拷贝构造。 */
-    Config& operator=(const Config& other) noexcept;
-    /** @brief 移动构造（不分配，恒成功）。 */
-    Config(Config&& other) noexcept;
-    /** @brief 移动赋值（不分配，恒成功）。 */
-    Config& operator=(Config&& other) noexcept;
-    /** @brief 析构（释放入口列表）。 */
-    ~Config() noexcept = default;
-
-    /**
-     * @brief 用 TOML 文本构造配置（转发到 @ref init）。
-     * @param toml TOML 文本，可带 EMBED_TXTFILES 追加的单个末尾 NUL
-     * @note 构造无法返回错误码，解析结果请查 @ref last_error 与 @ref report 。
-     */
-    explicit Config(std::string_view toml) noexcept;
-
-    /**
-     * @brief 用 TOML 文本**全量替换**配置。
-     *
-     * @details 语义是"重建"而不是"增量更新"：
-     *          1. 先把配置复位为缺省值（入口列表清空，但保留已分配容量）；
-     *          2. 再按 TOML 逐字段覆盖；
-     *          3. 最后重新补齐实例身份——**随机生成的缺省值也会重新生成**，
-     *             即未在 TOML 里显式给出 `instance_id` 时会得到一个新的 UUID v4，
-     *             `hostname` 回退 `Espressif`，`instance_name` 重新按 hostname 推导。
-     *          因此上一次 @ref init 的残留不会影响本次结果。
-     *
-     *          peer 错误（非 TCP、缺 uri、无效主机/端口等）与真正语法错误会返回失败；
-     *          未知或无法采用的**非 peer** 字段只记录诊断。失败时已解析的字段保留，
-     *          错误码写入 @ref last_error ，诊断写入 @ref report 。
-     *
-     * @param toml TOML 文本，可带单个末尾 NUL
-     * @return
-     *  - @c ESP_OK 解析成功（忽略项见 @ref report ）
-     *  - @c ESP_ERR_INVALID_ARG TOML 语法错误，或 peer 配置错误/不支持
-     *  - @c ESP_ERR_NO_MEM 超出文本长度/嵌套深度/解析内存预算
-     */
-    esp_err_t init(std::string_view toml) noexcept;
-
-    // ---- 诊断 ----------------------------------------------------------
-    /** @brief 最近一次 @ref init 的错误码（构造成功时为 @c ESP_OK）。 */
-    [[nodiscard]] esp_err_t last_error() const noexcept { return last_error_; }
-    /** @brief 最近一次 @ref init 的配置诊断。 */
-    [[nodiscard]] const ConfigReport& report() const noexcept { return report_; }
-
-    // ---- 组件内部使用（不属于公开 API）--------------------------------
-    /** @brief 清空诊断报告。 */
-    void clear_report() noexcept;
-    /** @brief 追加一条诊断（key 只记录字段路径）。 */
-    void add_diagnostic(ConfigIssue issue, uint32_t line, uint32_t column,
-                        std::string_view key) noexcept;
-    /** @brief 记录错误码（保留首个非 @c ESP_OK 的值）。 */
-    void set_error(esp_err_t err) noexcept;
-    /** @brief 标记 instance_name 由配置显式给出，使身份推导不再覆盖它。 */
-    void mark_instance_name_explicit() noexcept { instance_name_explicit_ = true; }
-
-    // 文本字段本身就是公开的 TextBuffer，直接用 `成员.view()` 读取，
-    // 不再提供一层只做转发的 view getter。
-    /** @brief 在 peer 通告其它子网之前使用的 dhcp 子网。 */
-    [[nodiscard]] uint32_t dhcp_subnet_or_default() const noexcept {
-        return dhcp_has_subnet ? dhcp_subnet : kDefaultDhcpSubnet;
-    }
-
-    // ---- 生效取值（由 Config 自己维护；应用只读使用）------------------
-    /// 实例名（缺省取 hostname）。长度无固定上限，按需分配。
-    TextBuffer instance_name{};
-    /// 主机名（缺省 Espressif）。长度无固定上限；规范化后最多 32 个码点。
-    TextBuffer hostname{};
-    std::array<uint8_t, 16> instance_id{};                        ///< 实例 UUID 字节
-    bool has_instance_id = false;  ///< 区分未指定 UUID 与显式全零 UUID
-
-    TextBuffer network_name{};      ///< 网络名（长度无固定上限）
-    TextBuffer network_secret{};    ///< 网络密钥（长度无固定上限）
-
-    PeerEndpointList peers{};  ///< 入口地址列表（条数由配置决定，无固定上限）
-
-    bool has_static_ipv4 = false;  ///< 是否配置了静态虚拟 IPv4
-    uint32_t static_ipv4 = 0;      ///< 静态虚拟 IPv4（数值表示）
-    uint8_t static_prefix = 24;    ///< 静态前缀长度
-
-    bool dhcp = false;                          ///< 是否启用虚拟地址自分配
-    bool dhcp_has_subnet = false;               ///< 是否显式配置了 dhcp 子网
-    uint32_t dhcp_subnet = kDefaultDhcpSubnet;  ///< dhcp 子网网络号
-    uint8_t dhcp_prefix = kDefaultDhcpPrefix;   ///< dhcp 子网前缀长度
-
-    /** @brief 是否对数据与 RPC 报文做 AES-128-GCM 加密（上游 `flags.enable_encryption`）。 */
-    bool enable_encryption = true;
-    uint16_t mtu = kDefaultMtu;  ///< 虚拟网卡 MTU，取值 576..1380
-
-private:
-    /**
-     * @brief 复位为缺省值（不补齐身份，由 @ref finalize_identity 负责）。
-     * @note 入口列表只清空内容、保留已分配容量。
-     */
-    void reset_to_defaults() noexcept;
-
-    /**
-     * @brief 补齐实例身份（构造与每次 @ref init 之后自动调用）。
-     * @details 规则与用户约定一致：
-     *          1. hostname 为空时回退 @ref kDefaultHostname ；
-     *          2. instance_name 未显式配置时取 hostname；
-     *          3. instance_id 未配置时生成随机 UUID v4（显式 UUID 含全零都保留）。
-     */
-    void finalize_identity() noexcept;
-
-    ConfigReport report_{};        ///< 最近一次解析的诊断
-    esp_err_t last_error_ = ESP_OK;  ///< 最近一次解析的错误码
-    bool instance_name_explicit_ = false;  ///< instance_name 是否由配置显式给出
+    void add(ConfigIssue issue, uint32_t line, uint32_t column,
+             std::string_view key) noexcept;
 };
 
 // ---------------------------------------------------------------------------
@@ -516,7 +169,7 @@ enum class EventType : uint8_t {
 /**
  * @brief 实例状态快照。
  *
- * @note 由 Inst::get_status() 返回调用方副本，不引用组件内部对象。
+ * @note 由 @ref Inst::get_status() 返回调用方副本，不引用组件内部对象。
  */
 struct Status {
     State state = State::Uninitialized;  ///< 当前状态
@@ -541,9 +194,9 @@ struct Event {
  * @brief 事件回调。
  *
  * @warning 回调在控制面任务（`et_proto`）上下文中**同步**执行，必须快速返回；
- * 回调内可以调用 Inst::get_status()/Inst::get_config_info()/Inst::set_underlay_ready()，
- * 但**禁止**调用会等待任务的 Inst::stop()/Inst::deinit()（会死锁），详见
- * @ref Inst 的"线程与回调约束"。
+ * 回调内可以调用 @ref Inst::get_status / @ref Inst::get_config_info /
+ * @ref Inst::set_underlay_ready，但**禁止**调用会等待任务的 @ref Inst::stop 或
+ * 析构该实例（会死锁），详见 @ref Inst 的"线程与回调约束"。
  * @param event 事件内容，仅在回调期间有效
  * @param user_data 注册时传入的用户上下文
  */
@@ -557,116 +210,155 @@ struct RuntimeOptions {
 };
 
 // ---------------------------------------------------------------------------
-// 全局单实例接口
+// 运行期实例
 // ---------------------------------------------------------------------------
 
 /**
- * @brief 全局单实例的运行期接口。
+ * @brief 一个 EasyTier 运行实例（RAII，也是本组件唯一的公开类）。
  *
- * @details 本项目只支持**一个** EasyTier 实例，因此不再提供实例类：所有运行期接口都是
- *          @c et::Inst 下的自由函数，内部状态是文件级静态数据。
+ * @details
+ * - **构造即初始化**：解析 TOML 文本、补齐实例身份、校验结构、在堆上分配运行上下文并
+ *   派生密钥（不创建任务）。TOML 是唯一配置入口，应用自己读取文件后把文本交给构造函数；
+ * - **析构即释放**：若已 @ref start 则先做无限等待的停止，再释放队列/连接/AEAD 并清零密钥；
+ * - **设置项没有独立的配置类**：全部字段是实例的私有实现细节，构造后不可修改；应用只能
+ *   通过 @ref report / @ref get_config_info 读取诊断快照；
+ * - **允许多个实例并存**：组件内部没有全局单实例状态，每个对象独占自己的上下文、队列、
+ *   任务、socket、虚拟网卡与事件回调。常驻内存、任务与连接槽按实例数量叠加，多实例时
+ *   应用需自行避免虚拟 IP/网段冲突；
+ * - 不可拷贝、不可移动：任务与回调持有上下文地址；
+ * - 组件禁用异常，构造不能返回错误码：用 @ref valid / @ref last_error / @ref report 检查。
  *
  * 典型调用顺序：
  * @code
- * static et::Config config;      // 或 static et::Config config(kTomlText);
- *
- * // 应用已完成 NVS / esp-netif / 事件循环初始化，并连上 WiFi。
- * ESP_ERROR_CHECK(config.init(kTomlText));
- * for (size_t i = 0; i < config.report().count; ++i) { ...打印被忽略的配置项... }
- * ESP_ERROR_CHECK(et::Inst::init(config));
- * ESP_ERROR_CHECK(et::Inst::start());
- * ESP_ERROR_CHECK(et::Inst::set_underlay_ready(true));
- * // 退出前（本接口没有析构函数，必须显式释放）：
- * ESP_ERROR_CHECK(et::Inst::stop());
- * ESP_ERROR_CHECK(et::Inst::deinit());
+ * // text 由应用读取（或像示例那样用 EMBED_TXTFILES 内嵌）；组件不接受文件路径。
+ * // 构造会解析 TOML 并分配约 91 KiB 上下文，请放在栈足够大的任务里。
+ * static std::optional<et::Inst> inst;      // 存储方式由应用决定
+ * inst.emplace(kTomlText, options);
+ * if (!inst->valid()) {
+ *     // 解析/校验失败：report() 里有字段路径级别的诊断
+ *     inst.reset();
+ *     return;
+ * }
+ * for (size_t i = 0; i < inst->report().count; ++i) { ...打印被忽略的配置项... }
+ * ESP_ERROR_CHECK(inst->start());
+ * ESP_ERROR_CHECK(inst->set_underlay_ready(true));
+ * // 退出前：可直接让对象析构（自动停止并释放），也可先显式 stop() 观察超时。
+ * ESP_ERROR_CHECK(inst->stop());
+ * inst.reset();
  * @endcode
  *
  * @section thread_safety 线程与回调约束
  *
  * | 接口 | 可从任意任务调用 | 允许在事件回调中调用 | 说明 |
  * | --- | --- | --- | --- |
- * | @ref get_status / @ref get_config_info | 是 | 是 | 只读原子量与不可变配置，返回副本 |
+ * | @ref get_status / @ref get_config_info / @ref report / @ref last_error | 是 | 是 | 只读原子量与不可变数据，返回副本/引用 |
  * | @ref set_underlay_ready | 是 | 是 | 非阻塞（队列投递），物理网络事件里直接调用 |
- * | @ref init | 仅初始化阶段 | 否 | 全局只有一个实例 |
- * | @ref start / @ref stop / @ref deinit | 同一任务串行 | **否** | 会等待任务，见下方死锁说明 |
+ * | 构造 | 仅初始化阶段（大栈任务） | 否 | 会解析 TOML 并分配上下文 |
+ * | @ref start / @ref stop / 析构 | 同一任务串行 | **否** | 会等待任务，见下方死锁说明 |
  *
  * 规则：
- * - **生命周期接口必须串行**：不要并发调用 start/stop/deinit。
+ * - **同一实例的生命周期接口必须串行**：不要并发调用 start/stop，也不要在别的任务正在
+ *   调用它们时销毁对象；不同实例之间互不影响。
  * - **事件回调运行在控制面任务（`et_proto`）里**，是同步回调（不是投递到应用队列）。
  *   因此在回调内调用会等待组件任务的接口都不安全：`stop()` 会等到超时并返回
- *   @c ESP_ERR_TIMEOUT（它等待的正是当前任务）。
+ *   @c ESP_ERR_TIMEOUT（它等待的正是当前任务），析构则会**永久阻塞**。
  *   回调也**不要**长时间阻塞，否则会拖慢握手、保活与路由同步。
  * - `get_status()`/`get_config_info()`/`set_underlay_ready()` 都只读原子量或做零等待
  *   入队，因此**在回调内或任意任务中调用都安全**。
  * - `stop()` 正常返回后，任务已全部退出，**不会再产生任何事件回调**；此时才可释放
  *   @ref RuntimeOptions::user_data 指向的对象。
- * - 因为不再有实例对象，**没有析构函数帮你收尾**：应用必须显式调用 @ref stop 与
- *   @ref deinit （例如在关机或重启流程里）。
+ * - 构造会解析 TOML（递归下降），并且对象自身含约 4.5 KiB 的诊断报告，**不要在小栈任务
+ *   （如 WiFi 事件任务）里构造实例**。
  */
-namespace Inst {
+class Inst final {
+public:
+    /**
+     * @brief 用 TOML 文本构造实例（不启动任务）。
+     * @param toml TOML 文本，可带 EMBED_TXTFILES 追加的单个末尾 NUL；内部非法 NUL 仍拒绝
+     * @param options 事件回调等运行期选项
+     * @note 构造无法返回错误码。失败（TOML 语法/peer 错误、结构校验失败、上下文分配失败）
+     *       时对象 @ref valid 为 false，原因见 @ref last_error ，诊断见 @ref report 。
+     */
+    explicit Inst(std::string_view toml, const RuntimeOptions& options = {}) noexcept;
 
-/**
- * @brief 用配置初始化全局实例（不启动任务）。
- * @param config 已构造/已解析的配置；入口列表会被深拷贝
- * @param options 事件回调等运行期选项
- * @return
- *  - @c ESP_OK 配置有效
- *  - @c ESP_ERR_INVALID_ARG 配置非法；配置自身的解析错误也会在此原样返回
- *  - @c ESP_ERR_NO_MEM 上下文或入口列表分配失败
- *  - @c ESP_ERR_INVALID_STATE 已经初始化过（必须先 deinit）
- * @note 若 @p config 的 @ref Config::last_error 非 @c ESP_OK ，直接返回该错误，
- *       避免把一份解析失败的配置带进运行期。
- */
-esp_err_t init(const Config& config, const RuntimeOptions& options = {}) noexcept;
+    /**
+     * @brief 析构：停止实例并释放全部资源、清零密钥。
+     * @warning 若实例仍在运行，析构会先做**无限等待**的停止（等价于
+     *          stop(UINT32_MAX)）。事件回调运行在控制面任务里，因此**禁止在事件回调中
+     *          析构**，否则永久阻塞。
+     */
+    ~Inst() noexcept;
 
-/**
- * @brief 启动实例（异步）。
- *
- * @note 返回成功只表示运行资源已创建，并不代表组网可用；组网可用会通过
- * @ref EventType::NetworkReady 事件或 @ref State::Ready 状态体现。
- * @return @c ESP_OK 或 @c ESP_ERR_INVALID_STATE（未初始化/重复启动）
- */
-esp_err_t start() noexcept;
+    /** @brief 不可复制：实例持有任务与 socket 所有权。 */
+    Inst(const Inst&) = delete;
+    /** @brief 不可复制赋值。 */
+    Inst& operator=(const Inst&) = delete;
+    /** @brief 不可移动：任务与回调持有上下文地址，移动会使其悬空。 */
+    Inst(Inst&&) = delete;
+    /** @brief 不可移动赋值。 */
+    Inst& operator=(Inst&&) = delete;
 
-/**
- * @brief 通知组件物理网络（WiFi/以太网）是否可用。
- *
- * @details 该接口非阻塞、可从事件回调中调用。物理网络断开时组件会撤销
- * 连接与路由，恢复后自动重连并重新同步。
- * @param ready true 表示物理网络已就绪
- * @return @c ESP_OK，或 @c ESP_ERR_INVALID_STATE、队列满错误
- */
-esp_err_t set_underlay_ready(bool ready) noexcept;
+    /** @brief 构造是否成功（等价于 @ref last_error 为 @c ESP_OK ）。 */
+    [[nodiscard]] bool valid() const noexcept {
+        return impl_ != nullptr && last_error_ == ESP_OK;
+    }
+    /** @brief 构造阶段的错误码；构造成功后的运行期错误见 @ref Status::last_error 。 */
+    [[nodiscard]] esp_err_t last_error() const noexcept { return last_error_; }
+    /**
+     * @brief 最近一次 TOML 解析的诊断（构造失败时为出错原因，构造成功时为被忽略的字段）。
+     * @note 返回内部引用，仅在实例存活期间有效；只记录字段路径，不含任何敏感取值。
+     */
+    [[nodiscard]] const ConfigReport& report() const noexcept { return report_; }
 
-/**
- * @brief 读取状态快照。
- * @param out 输出参数
- * @return @c ESP_OK 或 @c ESP_ERR_INVALID_ARG（out 无效）
- */
-esp_err_t get_status(Status& out) noexcept;
+    /**
+     * @brief 启动实例（异步）。
+     *
+     * @note 返回成功只表示运行资源已创建，并不代表组网可用；组网可用会通过
+     * @ref EventType::NetworkReady 事件或 @ref State::Ready 状态体现。
+     * @return @c ESP_OK 或 @c ESP_ERR_INVALID_STATE（构造失败/重复启动）
+     */
+    esp_err_t start() noexcept;
 
-/**
- * @brief 取回当前生效配置的诊断快照（仅用于日志/诊断）。
- * @return 未成功初始化时返回 @c ESP_ERR_INVALID_STATE
- */
-esp_err_t get_config_info(ConfigInfo& out) noexcept;
+    /**
+     * @brief 通知组件物理网络（WiFi/以太网）是否可用。
+     *
+     * @details 该接口非阻塞、可从事件回调中调用。物理网络断开时组件会撤销
+     * 连接与路由，恢复后自动重连并重新同步。
+     * @param ready true 表示物理网络已就绪
+     * @return @c ESP_OK，或 @c ESP_ERR_INVALID_STATE、队列满错误
+     */
+    esp_err_t set_underlay_ready(bool ready) noexcept;
 
-/**
- * @brief 停止实例（幂等）。
- * @param timeout_ms 等待任务退出的最长时间
- * @return
- *  - @c ESP_OK 已停止
- *  - @c ESP_ERR_TIMEOUT 超时；内部资源仍然保留，可重试 stop()
- *  - @c ESP_ERR_INVALID_STATE 未初始化
- */
-esp_err_t stop(uint32_t timeout_ms = 5000) noexcept;
+    /**
+     * @brief 读取状态快照。
+     * @param out 输出参数
+     * @return @c ESP_OK，或 @c ESP_ERR_INVALID_STATE（构造失败）
+     */
+    esp_err_t get_status(Status& out) const noexcept;
 
-/**
- * @brief 释放已停止实例的资源并清除密钥。
- * @return @c ESP_OK，或 @c ESP_ERR_INVALID_STATE（尚未停止或未初始化）
- */
-esp_err_t deinit() noexcept;
+    /**
+     * @brief 取回当前生效配置的诊断快照（仅用于日志/诊断）。
+     * @return 构造失败时返回 @c ESP_ERR_INVALID_STATE
+     */
+    esp_err_t get_config_info(ConfigInfo& out) const noexcept;
 
-}  // namespace Inst
+    /**
+     * @brief 停止实例（幂等）。
+     * @param timeout_ms 等待任务退出的最长时间
+     * @return
+     *  - @c ESP_OK 已停止
+     *  - @c ESP_ERR_TIMEOUT 超时；内部资源仍然保留，可重试 stop()
+     *  - @c ESP_ERR_INVALID_STATE 构造失败
+     */
+    esp_err_t stop(uint32_t timeout_ms = 5000) noexcept;
+
+private:
+    /** @brief 私有实现：运行上下文（含全部设置项）+ 运行标记（定义在 inst.cpp）。 */
+    struct Impl;
+
+    Impl* impl_ = nullptr;      ///< 堆上的上下文（92,800 B ≈ 91 KiB，建议启用 PSRAM）
+    ConfigReport report_{};     ///< 最近一次 TOML 解析诊断（约 4.5 KiB）
+    esp_err_t last_error_ = ESP_ERR_INVALID_STATE;  ///< 构造阶段错误码
+};
 
 }  // namespace et

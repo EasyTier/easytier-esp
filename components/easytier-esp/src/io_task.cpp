@@ -58,7 +58,7 @@ struct FrameSink {
 
 /** @brief 把槽的入口下标轮换到下一条（入口数为 0 时保持不变）。 */
 void advance_peer_index(const Context& ctx, size_t& index) noexcept {
-    const size_t count = ctx.config.peers.size();
+    const size_t count = ctx.settings.peers.size();
     index = count > 0 ? (index + 1) % count : 0;
 }
 
@@ -115,16 +115,16 @@ void post_frame(void* arg, Bytes body) noexcept {
 /** @brief 选择未被其它槽连接/连接中的入口；相同 host:port 只能占用一个槽。 */
 bool select_entry(const Context& ctx, const std::array<SlotState, kMaxConnSlots>& states,
                    size_t slot, size_t& index) noexcept {
-    const size_t count = ctx.config.peers.size();
+    const size_t count = ctx.settings.peers.size();
     for (size_t offset = 0; offset < count; ++offset) {
         const size_t candidate = (index + offset) % count;
-        const auto& peer = ctx.config.peers[candidate];
+        const auto& peer = ctx.settings.peers[candidate];
         bool occupied = false;
         for (size_t other = 0; other < kMaxConnSlots; ++other) {
             if (other == slot || (!states[other].connecting && !states[other].session_open))
                 continue;
-            const auto& used = ctx.config.peers[states[other].peer_index];
-            if (used.port == peer.port && used.host.view() == peer.host.view()) {
+            const auto& used = ctx.settings.peers[states[other].peer_index];
+            if (used.port == peer.port && used.host == peer.host) {
                 occupied = true;
                 break;
             }
@@ -227,7 +227,7 @@ void pump_tx(Context& ctx, std::array<SlotState, kMaxConnSlots>& states) noexcep
 /** @brief I/O 任务主循环。 */
 void io_task(void* arg) noexcept {
     auto& ctx = *static_cast<Context*>(arg);
-    const size_t peer_count = ctx.config.peers.size();
+    const size_t peer_count = ctx.settings.peers.size();
     std::array<SlotState, kMaxConnSlots> states{};
     for (size_t i = 0; i < kMaxConnSlots; ++i) {
         if (ctx.slots[i].conn == nullptr) {
@@ -298,8 +298,8 @@ void io_task(void* arg) noexcept {
             if (i >= peer_count) continue;  // 入口少于槽数时让多出的槽闲置，不能取模重复连接
             if (!deadline_reached(now_ms(), st.retry_at_ms)) continue;
             if (!select_entry(ctx, states, i, st.peer_index)) continue;
-            const PeerEndpoint& peer = ctx.config.peers[st.peer_index];
-            if (!conn_slot.conn->begin_connect(peer.host.view(), peer.port)) {
+            const PeerEndpoint& peer = ctx.settings.peers[st.peer_index];
+            if (!conn_slot.conn->begin_connect(peer.host, peer.port)) {
                 advance_peer_index(ctx, st.peer_index);
                 (void)schedule_retry(st);
                 continue;

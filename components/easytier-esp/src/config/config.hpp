@@ -1,18 +1,20 @@
 /**
  * @file config.hpp
- * @brief 配置解析与校验的辅助函数（配置数据本身见公开的 @ref et::Config ）。
+ * @brief 设置项的解析与校验辅助函数（设置数据本身见 @ref et::Settings ）。
  *
- * @details 公开的 @ref et::Config 同时是"用户输入"与"生效配置"，因此本头文件只保留
+ * @details 公开 API 只有一个 @ref et::Inst 类，设置项是它的私有实现；因此本头文件只保留
  *          纯函数式助手：字符串/地址/UUID 解析、主机名规范化、结构校验。TOML 入口与
- *          编程式 setter 复用同一批函数，避免两套语义漂移。
+ *          校验复用同一批函数，避免两套语义漂移。
  */
 #pragma once
 
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <string>
 #include <string_view>
 
+#include "config/settings.hpp"
 #include "easytier-esp.h"
 
 namespace et {
@@ -63,13 +65,11 @@ void format_uuid_text(const uint8_t* id, char* out) noexcept;
  * @brief 按上游 hostname 规则规范化后写入 @p out 。
  *
  * @details 去除控制字符，最多保留 32 个 Unicode 码点（上游 `hostname` 规则），因此结果
- *          不会超过 128 字节。字段本身按需分配、没有固定容量限制，这里保留该规则只是
- *          为了与上游语义一致。
+ *          不会超过 128 字节（在 `std::string` 的 SSO 范围内）。
  * @param in 原始主机名
- * @param out 输出文本缓冲
- * @return @c ESP_OK，或 @c ESP_ERR_NO_MEM
+ * @param out 输出文本；失败（含全是控制字符）时被清空
  */
-[[nodiscard]] esp_err_t normalize_hostname(std::string_view in, TextBuffer& out) noexcept;
+void normalize_hostname(std::string_view in, std::string& out) noexcept;
 
 /** @brief 取地址的网络号，如 prefix=0 返回 0。 */
 [[nodiscard]] uint32_t ipv4_network_of(uint32_t addr, uint8_t prefix) noexcept;
@@ -84,6 +84,6 @@ void format_uuid_text(const uint8_t* id, char* out) noexcept;
  * @return @c ESP_OK 或 @c ESP_ERR_INVALID_ARG
  * @note 入口**数量**没有上限；可同时连接的数量由 Kconfig 决定。
  */
-[[nodiscard]] esp_err_t validate_config(const Config& cfg) noexcept;
+[[nodiscard]] esp_err_t validate_config(const Settings& cfg) noexcept;
 
 }  // namespace et

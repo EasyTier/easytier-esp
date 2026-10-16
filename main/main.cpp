@@ -1,268 +1,35 @@
 /**
  * @file main.cpp
- * @brief EasyTier-ESP 示例：连接 WiFi 并加入 EasyTier 虚拟网络。
+ * @brief EasyTier-ESP 示例入口：NVS、TCP/IP、WiFi 与模块装配。
  *
- * @details 示例刻意保持简单，只做应用侧必须负责的事：
- * 1. 初始化 NVS、esp-netif 与默认事件循环；
- * 2. 以 STA 模式连接 WiFi，并在断开时自动重连；
- * 3. 用嵌入的 easytier.toml 构造 et::Config（文件不存在时只连 WiFi），并初始化 et::Inst；
- * 4. 取得 IP 后启动组网并通知 underlay 就绪，失去 IP 时通知断开；
- * 5. 打印组件上报的组网事件。
+ * @details 示例刻意保持"只做应用侧必须负责的事"，并按职责拆成三个模块：
+ * 1. **本文件**：NVS、TCP/IP 栈、WiFi 连接与重连、装配并启动下面的两个模块；
+ * 2. @ref easytier_app ：加载内嵌 TOML、启动组网任务、上报组网事件与周期状态；
+ * 3. @ref http_control ：GPIO38 电平输出 + 监听 80 端口的 HTTP 控制服务。
  *
  * 协议、加密、RPC、路由与虚拟网卡全部由 components/easytier-esp 负责，
- * 本文件不含任何协议实现。
+ * 本目录不含任何协议实现；本文件也不再直接引用 `et::` 任何符号。
  */
-#include <cstdio>
 #include <cstring>
 
-#include "easytier-esp.h"
+#include "easytier_app.hpp"
+#include "http_control.hpp"
 
 #include "esp_event.h"
 #include "esp_log.h"
-#include "esp_timer.h"
 #include "esp_netif.h"
 #include "esp_wifi.h"
-#include "freertos/FreeRTOS.h"
-#include "freertos/task.h"
 #include "nvs_flash.h"
+#include "sdkconfig.h"
 
 namespace {
 
 constexpr const char* kTag = "et_example";
 
-/** @brief 组网是否已启动（在事件回调中判断，避免重复 start）。 */
-bool g_started = false;
 /** @brief WiFi 重连计数。 */
 int g_retry = 0;
 
-/**
- * @brief CMake EMBED_TXTFILES 生成的符号：嵌入的 TOML 配置。
- * @note main/easytier.toml 含真实入口地址与网络密钥，已被 .gitignore 忽略，因此新克隆
- *       的仓库里不存在，CMake 也不会嵌入（见 main/CMakeLists.txt）。
- */
-#if defined(EASYTIER_EXAMPLE_TOML_EMBEDDED)
-extern const uint8_t easytier_toml_start[] asm("_binary_easytier_toml_start");
-extern const uint8_t easytier_toml_end[] asm("_binary_easytier_toml_end");
-#endif
-
-/**
- * @brief 组件事件回调：只做打印，保持快速返回。
- * @note 只有内嵌配置（EASYTIER_EXAMPLE_TOML_EMBEDDED）的构建才会注册它。
- */
-[[maybe_unused]] void on_easytier_event(const et::Event& event, void*) noexcept {
-    switch (event.type) {
-        case et::EventType::Started:
-            ESP_LOGI(kTag, "easytier started, peer_id=%u", static_cast<unsigned>(event.status.peer_id));
-            break;
-        case et::EventType::PeerUp:
-            ESP_LOGI(kTag, "peer connected: %u", static_cast<unsigned>(event.peer_id));
-            break;
-        case et::EventType::NetworkReady:
-            ESP_LOGI(kTag, "network ready, virtual ip=%u.%u.%u.%u/%u",
-                     static_cast<unsigned>((event.status.virtual_ipv4 >> 24) & 0xff),
-                     static_cast<unsigned>((event.status.virtual_ipv4 >> 16) & 0xff),
-                     static_cast<unsigned>((event.status.virtual_ipv4 >> 8) & 0xff),
-                     static_cast<unsigned>(event.status.virtual_ipv4 & 0xff),
-                     static_cast<unsigned>(event.status.prefix_len));
-            break;
-        case et::EventType::PeerDown:
-            ESP_LOGW(kTag, "peer disconnected: %u", static_cast<unsigned>(event.peer_id));
-            break;
-        case et::EventType::Error:
-            ESP_LOGE(kTag, "easytier error: 0x%x", event.status.last_error);
-            break;
-        case et::EventType::Stopped:
-            ESP_LOGI(kTag, "easytier stopped");
-            break;
-    }
-}
-
-/** @brief 配置诊断快照：约 2.3 KiB，放静态区避免占用栈。 */
-et::ConfigInfo g_config_info;
-
-/** @brief 状态名（日志用）。 */
-const char* state_name(et::State state) {
-    switch (state) {
-        case et::State::Uninitialized: return "uninitialized";
-        case et::State::Stopped: return "stopped";
-        case et::State::WaitingUnderlay: return "waiting-underlay";
-        case et::State::Connecting: return "connecting";
-        case et::State::Handshaking: return "handshaking";
-        case et::State::Syncing: return "syncing";
-        case et::State::Ready: return "ready";
-        case et::State::Stopping: return "stopping";
-        case et::State::Error: return "error";
-    }
-    return "unknown";
-}
-
-/**
- * @brief 打印当前组网状态。
- * @details 联调时最重要的观测手段：把状态、虚拟地址、直连数、可达路由与丢弃计数
- *          一行打出来，便于和入口节点的日志对照。
- */
-void log_status() {
-    et::Status status{};
-    if (et::Inst::get_status(status) != ESP_OK) {
-        return;
-    }
-    char vip[24] = "none";
-    if (status.virtual_ipv4 != 0) {
-        (void)snprintf(vip, sizeof(vip), "%u.%u.%u.%u/%u",
-                       static_cast<unsigned>((status.virtual_ipv4 >> 24) & 0xFF),
-                       static_cast<unsigned>((status.virtual_ipv4 >> 16) & 0xFF),
-                       static_cast<unsigned>((status.virtual_ipv4 >> 8) & 0xFF),
-                       static_cast<unsigned>(status.virtual_ipv4 & 0xFF),
-                       static_cast<unsigned>(status.prefix_len));
-    }
-    ESP_LOGI(kTag,
-             "status: state=%s peer_id=0x%08x vip=%s direct=%u routes=%u dropped=%llu err=0x%x",
-             state_name(status.state), static_cast<unsigned>(status.peer_id), vip,
-             static_cast<unsigned>(status.direct_peer_count),
-             static_cast<unsigned>(status.reachable_route_count),
-             static_cast<unsigned long long>(status.dropped_packets),
-             static_cast<int>(status.last_error));
-}
-
-/**
- * @brief 打印实际生效的配置（TOML 的映射结果）。
- * @note 只有内嵌配置（EASYTIER_EXAMPLE_TOML_EMBEDDED）的构建才会调用它。
- */
-[[maybe_unused]] void log_effective_config() {
-    if (et::Inst::get_config_info(g_config_info) != ESP_OK) {
-        return;
-    }
-    ESP_LOGI(kTag, "config: instance=%s hostname=%s network=%s instance_id=%s",
-             g_config_info.instance_name.data(), g_config_info.hostname.data(),
-             g_config_info.network_name.data(), g_config_info.instance_id.data());
-    for (size_t i = 0; i < g_config_info.peer_count; ++i) {
-        ESP_LOGI(kTag, "config: peer[%u]=%s", static_cast<unsigned>(i),
-                 g_config_info.peers[i].text.data());
-    }
-    if (g_config_info.peers_truncated) {
-        // 入口条目数没有上限，但诊断快照只保留前几条，这里明确提示总数。
-        ESP_LOGW(kTag, "config: %u entry peers configured, only the first %u are shown",
-                 static_cast<unsigned>(g_config_info.peer_total_count),
-                 static_cast<unsigned>(g_config_info.peer_count));
-    }
-    if (g_config_info.has_static_ipv4) {
-        ESP_LOGI(kTag, "config: ipv4=%u.%u.%u.%u/%u mtu=%u",
-                 static_cast<unsigned>((g_config_info.static_ipv4 >> 24) & 0xFF),
-                 static_cast<unsigned>((g_config_info.static_ipv4 >> 16) & 0xFF),
-                 static_cast<unsigned>((g_config_info.static_ipv4 >> 8) & 0xFF),
-                 static_cast<unsigned>(g_config_info.static_ipv4 & 0xFF),
-                 static_cast<unsigned>(g_config_info.static_prefix),
-                 static_cast<unsigned>(g_config_info.mtu));
-    } else if (g_config_info.dhcp) {
-        ESP_LOGI(kTag, "config: dhcp=%s mtu=%u", g_config_info.dhcp_subnet.data(),
-                 static_cast<unsigned>(g_config_info.mtu));
-    } else {
-        ESP_LOGW(kTag, "config: 既没有静态 ipv4 也没有启用 dhcp，虚拟网卡不会创建");
-    }
-    // 加密开关直接影响能否与对端互通，单独打印一行便于上板核对。
-    ESP_LOGI(kTag, "config: encryption=%s",
-             g_config_info.enable_encryption ? "aes-gcm" : "disabled");
-}
-
-/**
- * @brief 周期状态打印（10 秒一次，不占用任务栈）。
- * @note 只有内嵌配置（EASYTIER_EXAMPLE_TOML_EMBEDDED）的构建才会注册它。
- */
-[[maybe_unused]] void status_timer_cb(void*) { log_status(); }
-
-/// 组网启动任务的栈大小：解析 TOML、派生密钥都需要调用方提供足够栈。
-constexpr uint32_t kStartTaskStack = 8192;
-
-/** @brief 启动组网（定义见下方）。 */
-void start_easytier();
-
-/**
- * @brief 一次性启动任务。
- * @details WiFi 事件回调运行在系统事件任务上（栈只有几 KiB），而组网初始化要解析
- *          TOML、派生密钥并创建任务，因此必须放到独立任务里执行；事件回调本身只
- *          负责创建这个任务并立即返回。
- */
-void start_task(void*) {
-    start_easytier();
-    if (g_started) {
-        // 通知组件物理网络就绪：此后组件才会连接入口节点。
-        (void)et::Inst::set_underlay_ready(true);
-    }
-    vTaskDelete(nullptr);
-}
-
-/** @brief 启动组网（只在取得 IP 后调用一次）。 */
-void start_easytier() {
-    if (g_started) {
-        return;
-    }
-#if !defined(EASYTIER_EXAMPLE_TOML_EMBEDDED)
-    // main/easytier.toml 不在版本库里（含真实地址与密钥），此构建没有内嵌配置：
-    // 只保持 WiFi 连接，不启动组网，并明确提示如何补上配置。
-    ESP_LOGW(kTag,
-             "main/easytier.toml not found; create it and rebuild "
-             "(TOML format: components/easytier-esp/README.md)");
-    return;
-#else
-    auto len = static_cast<size_t>(easytier_toml_end - easytier_toml_start);
-    // EMBED_TXTFILES 会把 NUL 计入 end-start；它是字符串终止符，不是 TOML 内容。
-    if (len != 0 && easytier_toml_start[len - 1] == 0) --len;
-    // Config 含约 4.4 KiB 诊断报告，放静态区避免占用本任务 8 KiB 的栈。
-    static et::Config config;
-    const esp_err_t parse_err = config.init(
-        std::string_view(reinterpret_cast<const char*>(easytier_toml_start), len));
-    const et::ConfigReport& report = config.report();
-    if (parse_err != ESP_OK) {
-        ESP_LOGE(kTag, "easytier config rejected: 0x%x", parse_err);
-        for (size_t i = 0; i < report.count; ++i) {
-            const et::ConfigDiagnostic& d = report.items[i];
-            ESP_LOGE(kTag, "config issue %d key=%s line=%u column=%u",
-                     static_cast<int>(d.issue), d.key.data(), static_cast<unsigned>(d.line),
-                     static_cast<unsigned>(d.column));
-        }
-        return;
-    }
-    // 被忽略但不影响使用的配置项以警告形式列出，便于排查"配置没生效"。
-    for (size_t i = 0; i < report.count; ++i) {
-        ESP_LOGW(kTag, "ignored config: key=%s", report.items[i].key.data());
-    }
-
-    et::RuntimeOptions runtime_options{};
-    runtime_options.on_event = &on_easytier_event;
-    const esp_err_t init_err = et::Inst::init(config, runtime_options);
-    if (init_err != ESP_OK) {
-        ESP_LOGE(kTag, "easytier init failed: 0x%x", init_err);
-        return;
-    }
-
-    log_effective_config();
-
-    const esp_err_t start_err = et::Inst::start();
-    if (start_err != ESP_OK) {
-        ESP_LOGE(kTag, "easytier start failed: 0x%x", start_err);
-        return;
-    }
-    g_started = true;
-
-    // 周期打印状态：第一次立即打印，之后每 10 秒一次（联调主要靠这行日志）。
-    static esp_timer_handle_t status_timer = nullptr;
-    if (status_timer == nullptr) {
-        const esp_timer_create_args_t args = {
-            .callback = &status_timer_cb,
-            .arg = nullptr,
-            .dispatch_method = ESP_TIMER_TASK,
-            .name = "et_status",
-            .skip_unhandled_events = true,
-        };
-        if (esp_timer_create(&args, &status_timer) == ESP_OK) {
-            (void)esp_timer_start_periodic(status_timer, 10 * 1000 * 1000);
-        }
-    }
-    log_status();
-#endif  // EASYTIER_EXAMPLE_TOML_EMBEDDED
-}
-
-/** @brief WiFi 与 IP 事件处理。 */
+/** @brief WiFi 与 IP 事件处理（必须快速返回，重活交给各模块）。 */
 void on_wifi_event(void*, esp_event_base_t base, int32_t id, void* data) {
     if (base == WIFI_EVENT && id == WIFI_EVENT_STA_START) {
         (void)esp_wifi_connect();
@@ -270,9 +37,7 @@ void on_wifi_event(void*, esp_event_base_t base, int32_t id, void* data) {
     }
     if (base == WIFI_EVENT && id == WIFI_EVENT_STA_DISCONNECTED) {
         // 物理网络断开：先通知组件撤销连接与路由，再重连 WiFi。
-        if (g_started) {
-            (void)et::Inst::set_underlay_ready(false);
-        }
+        easytier_app::on_ip_lost();
         const int max_retry = CONFIG_EXAMPLE_WIFI_MAX_RETRY;
         if (max_retry == 0 || g_retry < max_retry) {
             ++g_retry;
@@ -287,16 +52,8 @@ void on_wifi_event(void*, esp_event_base_t base, int32_t id, void* data) {
         const auto* event = static_cast<const ip_event_got_ip_t*>(data);
         ESP_LOGI(kTag, "got ip: " IPSTR, IP2STR(&event->ip_info.ip));
         g_retry = 0;
-#if CONFIG_EXAMPLE_EASYTIER_TOML_ENABLED
-        // 事件回调必须快速返回：首次初始化交给独立任务（见 start_task）。
-        if (!g_started) {
-            (void)xTaskCreate(start_task, "et_start", kStartTaskStack, nullptr, 5, nullptr);
-        } else {
-            // WiFi 掉线重连后**必须重新**通知组件物理网络就绪，否则组件会一直停在
-            // underlay_ready=false，永远不再连接入口（曾经的真实缺陷）。
-            (void)et::Inst::set_underlay_ready(true);
-        }
-#endif
+        // 首次调用会创建一次性组网启动任务；之后只补发 underlay 就绪。
+        easytier_app::on_ip_got();
     }
 }
 
@@ -310,10 +67,14 @@ void init_nvs() {
     ESP_ERROR_CHECK(err);
 }
 
-/** @brief 初始化 WiFi STA 并开始连接。 */
-void init_wifi() {
+/** @brief 初始化 TCP/IP 栈与默认事件循环（HTTP 服务与 WiFi 都依赖它）。 */
+void init_tcpip() {
     ESP_ERROR_CHECK(esp_netif_init());
     ESP_ERROR_CHECK(esp_event_loop_create_default());
+}
+
+/** @brief 初始化 WiFi STA 并开始连接。 */
+void init_wifi() {
     (void)esp_netif_create_default_wifi_sta();
 
     wifi_init_config_t wifi_config = WIFI_INIT_CONFIG_DEFAULT();
@@ -324,6 +85,8 @@ void init_wifi() {
         IP_EVENT, IP_EVENT_STA_GOT_IP, &on_wifi_event, nullptr, nullptr));
 
     wifi_config_t sta_config{};
+    // 凭据用的是字面量：Kconfig 里的 EXAMPLE_WIFI_SSID / EXAMPLE_WIFI_PASSWORD 目前
+    // 没有被任何代码引用。要改成走 menuconfig，把下面两行的字面量换成这两个宏即可。
     std::strncpy(reinterpret_cast<char*>(sta_config.sta.ssid), "ET_TEST_SSID",
                  sizeof(sta_config.sta.ssid) - 1);
     std::strncpy(reinterpret_cast<char*>(sta_config.sta.password), "ET_TEST_PWD",
@@ -343,9 +106,19 @@ void init_wifi() {
  */
 extern "C" void app_main(void) {
     init_nvs();
-#if CONFIG_EXAMPLE_EASYTIER_TOML_ENABLED
-    ESP_LOGI(kTag, "starting EasyTier-ESP example");
-#endif
+    ESP_LOGI(kTag, "EasyTier-ESP example starting");
+
+    // TCP/IP 先起来：HTTP 服务需要 socket，WiFi 也需要 netif 层的默认事件循环。
+    init_tcpip();
+
+    // 电平输出与 HTTP 服务尽早就绪（GPIO38 上电即高）。失败只告警：它是示例扩展，
+    // 不应该拖累组网主流程。
+    const esp_err_t http_err = http_control::start();
+    if (http_err != ESP_OK) {
+        ESP_LOGW(kTag, "http control service unavailable: 0x%x",
+                 static_cast<unsigned>(http_err));
+    }
+
     init_wifi();
-    // 之后由 WiFi/IP 事件驱动：取得 IP → 启动组网并通知 underlay 就绪。
+    // 之后由 WiFi/IP 事件驱动：取得 IP → easytier_app::on_ip_got() 启动组网。
 }

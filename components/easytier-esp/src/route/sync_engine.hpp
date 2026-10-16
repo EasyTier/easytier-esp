@@ -17,7 +17,7 @@
 #include <cstdint>
 #include <span>
 
-#include "config/config.hpp"
+#include "config/settings.hpp"
 #include "protocol/messages.hpp"
 #include "route/dhcp.hpp"
 #include "route/route_info.hpp"
@@ -63,11 +63,11 @@ public:
     static constexpr size_t kMaxResponseBytes = 2048;
 
     /**
-     * @brief 配置引擎（复制配置中需要的字段）。
-     * @param config 已校验配置
+     * @brief 配置引擎（复制设置中需要的字段）。
+     * @param settings 已校验的实例设置
      * @param my_peer_id 本节点 peer id
      */
-    void configure(const Config& config, uint32_t my_peer_id) noexcept;
+    void configure(const Settings& settings, uint32_t my_peer_id) noexcept;
 
     /** @brief 复位为初始状态（停止/断开时调用）。 */
     void reset() noexcept;
@@ -175,7 +175,7 @@ private:
      */
     struct EngineConfig {
         std::array<uint8_t, 16> instance_id{};            ///< 实例 UUID
-        TextBuffer hostname{};                             ///< 主机名（已规范化）
+        std::string hostname{};                            ///< 主机名（已规范化）
         bool has_static_ipv4 = false;                      ///< 是否配置了静态虚拟 IPv4
         uint32_t static_ipv4 = 0;                          ///< 静态虚拟 IPv4
         uint8_t static_prefix = 24;                        ///< 静态前缀长度

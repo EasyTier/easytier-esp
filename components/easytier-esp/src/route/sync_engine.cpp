@@ -17,23 +17,20 @@ constexpr const char* kTag = "ET.SYNC";
 }  // namespace
 
 /** @brief 配置引擎并复位状态。 */
-void SyncEngine::configure(const Config& config, uint32_t my_peer_id) noexcept {
+void SyncEngine::configure(const Settings& settings, uint32_t my_peer_id) noexcept {
     // 只拷贝引擎真正需要的字段：入口列表可能很大，且引擎根本用不到它。
     config_ = EngineConfig{};
-    config_.instance_id = config.instance_id;
-    const esp_err_t host_err = config_.hostname.copy_from(config.hostname);
-    if (host_err != ESP_OK) {
-        ET_LOGW(kTag, "cannot copy hostname (%d)", static_cast<int>(host_err));
-    }
-    config_.has_static_ipv4 = config.has_static_ipv4;
-    config_.static_ipv4 = config.static_ipv4;
-    config_.static_prefix = config.static_prefix;
-    config_.dhcp = config.dhcp;
+    config_.instance_id = settings.instance_id;
+    config_.hostname = settings.hostname;
+    config_.has_static_ipv4 = settings.has_static_ipv4;
+    config_.static_ipv4 = settings.static_ipv4;
+    config_.static_prefix = settings.static_prefix;
+    config_.dhcp = settings.dhcp;
     my_peer_id_ = my_peer_id;
     reset();
     my_ipv4_ = config_.has_static_ipv4 ? config_.static_ipv4 : 0;
     my_prefix_ = config_.has_static_ipv4 ? config_.static_prefix : 24;
-    dhcp_.configure(config.dhcp_has_subnet, config.dhcp_subnet, config.dhcp_prefix);
+    dhcp_.configure(settings.dhcp_has_subnet, settings.dhcp_subnet, settings.dhcp_prefix);
     dhcp_.reset();
 }
 
@@ -160,7 +157,7 @@ bool SyncEngine::build_self_info(uint32_t now) noexcept {
     info.network_length = my_prefix_;
     // 首版能力：支持邻接收敛、禁用 P2P；不宣告 public server / avoid relay。
     info.feature_flags = peer_feature::SupportConnListSync | peer_feature::DisableP2p;
-    info.hostname = config_.hostname.view();
+    info.hostname = config_.hostname;
     info.last_update_secs = now / 1000;  // 仅参考；对端会用本地时间覆盖
     const size_t len = encode_route_peer_info(info, self_peer_info_);
     if (len == 0) {

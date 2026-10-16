@@ -141,7 +141,7 @@ bool send_rpc_message(Context& ctx, uint32_t generation, const RpcSendTemplate& 
         // RPC 与数据共用同一个加密开关：关闭时不加 AEAD 尾也不置加密位。
         if (!send_control_frame(ctx, generation, type, tmpl.from_peer, tmpl.to_peer,
                                 Bytes(ctx.rpc_plain.data(), encoded),
-                                /*encrypt=*/ctx.config.enable_encryption)) {
+                                /*encrypt=*/ctx.settings.enable_encryption)) {
             return false;
         }
     }
@@ -286,7 +286,7 @@ bool send_sync_request(Context& ctx, uint32_t generation, uint32_t remote_peer_i
     tmpl.transaction_id = transaction_id;
     tmpl.is_request = true;
     tmpl.trace_id = 0;
-    tmpl.descriptor.domain_name = ctx.config.network_name.view();
+    tmpl.descriptor.domain_name = ctx.settings.network_name;
     tmpl.descriptor.proto_name = kOspfProtoName;
     tmpl.descriptor.service_name = kOspfServiceName;
     tmpl.descriptor.method_index = kOspfSyncMethodIndex;
@@ -326,7 +326,7 @@ void sync_netif_address(Context& ctx) noexcept {
         return;
     }
     if (!ctx.netif_created) {
-        const esp_err_t err = ctx.virtual_netif.create(address, prefix, ctx.config.mtu,
+        const esp_err_t err = ctx.virtual_netif.create(address, prefix, ctx.settings.mtu,
                                                        static_cast<void*>(ctx.q_netif_rx),
                                                        &ctx.generation);
         ctx.netif_created = err == ESP_OK;
@@ -412,13 +412,13 @@ void proto_task(void* arg) noexcept {
     auto& ctx = *static_cast<Context*>(arg);
 
     HandshakeExpectation expect{};
-    expect.network_name = ctx.config.network_name.view();
+    expect.network_name = ctx.settings.network_name;
     expect.digest = ctx.digest;
     expect.my_peer_id = ctx.my_peer_id.load();
 
     // 注册 OSPF 路由同步服务（M2 返回空拓扑，M3 填充真实信息）。
     if (ctx.registry.size() == 0) {
-        const RpcServiceId id{ctx.config.network_name.view(), kOspfProtoName, kOspfServiceName,
+        const RpcServiceId id{ctx.settings.network_name, kOspfProtoName, kOspfServiceName,
                               kOspfSyncMethodIndex};
         if (!ctx.registry.add(id, &handle_ospf_sync, &ctx)) {
             ctx.set_error(ESP_FAIL);
@@ -551,7 +551,7 @@ void proto_task(void* arg) noexcept {
             if (encrypted) {
                 if (!to_me) {
                     // 非本地目标：交给下面的 RPC 转发分支处理（不解密）。
-                } else if (!ctx.config.enable_encryption) {
+                } else if (!ctx.settings.enable_encryption) {
                     // 关闭加密时与上游 NullCipher 一致：明文可收，已加密报文直接拒绝。
                     ctx.dropped.fetch_add(1);
                     continue;
@@ -585,7 +585,7 @@ void proto_task(void* arg) noexcept {
                     ctx.network_ready_reported = false;
                     ctx.sync.on_peer_up(remote, session_id[slot], now);
                     publish_direct_peers();
-                    if (ctx.config.has_static_ipv4) {
+                    if (ctx.settings.has_static_ipv4) {
                         sync_netif_address(ctx);  // 静态地址：握手后拉起虚拟网卡
                     } else if (ctx.netif_created) {
                         (void)ctx.virtual_netif.set_link(true);

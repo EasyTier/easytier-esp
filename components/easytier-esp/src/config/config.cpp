@@ -1,12 +1,13 @@
 /**
  * @file config.cpp
- * @brief @ref et::Config 的实现与配置解析助手（IPv4/CIDR/UUID/主机名/入口 URI）。
+ * @brief @ref et::Settings 的补齐逻辑、@ref et::ConfigReport 诊断，以及解析助手
+ *        （IPv4/CIDR/UUID/主机名/入口 URI）。
  */
 #include "config/config.hpp"
 
 #include <cstring>
+#include <string>
 
-#include "config/toml.hpp"
 #include "support/log.hpp"
 #include "support/random.hpp"
 
@@ -68,91 +69,20 @@ constexpr const char* kTag = "ET.CONFIG";
 }  // namespace
 
 // ---------------------------------------------------------------------------
-// Config：构造、身份与诊断
+// Settings：身份补齐与敏感文本清除
 // ---------------------------------------------------------------------------
-
-/** @brief 复位为缺省值（不补齐身份，由 finalize_identity() 负责）。 */
-void Config::reset_to_defaults() noexcept {
-    instance_name_explicit_ = false;
-    has_instance_id = false;
-    instance_name.clear();
-    hostname.clear();
-    instance_id.fill(0);
-    (void)network_name.assign(kDefaultNetworkName);
-    network_secret.zeroize();
-    peers.clear();  // 保留已分配的容量，避免每次初始化都重新分配
-    has_static_ipv4 = false;
-    static_ipv4 = 0;
-    static_prefix = 24;
-    dhcp = false;
-    dhcp_has_subnet = false;
-    dhcp_subnet = kDefaultDhcpSubnet;
-    dhcp_prefix = kDefaultDhcpPrefix;
-    enable_encryption = true;
-    mtu = kDefaultMtu;
-}
-
-/** @brief 构造缺省配置，并立即补齐实例身份。 */
-Config::Config() noexcept {
-    reset_to_defaults();
-    finalize_identity();
-}
-
-/** @brief 拷贝构造：文本字段与入口列表都深拷贝，分配失败时把错误记录在副本里。 */
-Config::Config(const Config& other) noexcept
-    : instance_id(other.instance_id),
-      has_instance_id(other.has_instance_id),
-      has_static_ipv4(other.has_static_ipv4),
-      static_ipv4(other.static_ipv4),
-      static_prefix(other.static_prefix),
-      dhcp(other.dhcp),
-      dhcp_has_subnet(other.dhcp_has_subnet),
-      dhcp_subnet(other.dhcp_subnet),
-      dhcp_prefix(other.dhcp_prefix),
-      enable_encryption(other.enable_encryption),
-      mtu(other.mtu),
-      report_(other.report_),
-      last_error_(other.last_error_),
-      instance_name_explicit_(other.instance_name_explicit_) {
-    // TextBuffer 成员在此按需分配深拷贝；任何一步失败都记录错误但保留已拷贝的部分。
-    esp_err_t err = instance_name.copy_from(other.instance_name);
-    if (err == ESP_OK) err = hostname.copy_from(other.hostname);
-    if (err == ESP_OK) err = network_name.copy_from(other.network_name);
-    if (err == ESP_OK) err = network_secret.copy_from(other.network_secret);
-    if (err == ESP_OK) err = peers.copy_from(other.peers);
-    if (err != ESP_OK) {
-        set_error(err);
-        ET_LOGE(kTag, "cannot copy config (%d)", static_cast<int>(err));
-    }
-}
-
-/** @brief 拷贝赋值。 */
-Config& Config::operator=(const Config& other) noexcept {
-    if (this != &other) {
-        // 复用拷贝构造 + 移动赋值的写法，避免重复字段列表。
-        Config copy(other);
-        *this = std::move(copy);
-    }
-    return *this;
-}
-
-/** @brief 移动构造（不分配）。 */
-Config::Config(Config&& other) noexcept = default;
-
-/** @brief 移动赋值（不分配）。 */
-Config& Config::operator=(Config&& other) noexcept = default;
 
 /**
  * @brief 补齐实例身份。
  * @details 与用户约定一致：hostname 缺省回退 Espressif；instance_name 未显式配置时取
  *          hostname；instance_id 缺省生成随机 UUID v4（显式 UUID 含全零都保留）。
  */
-void Config::finalize_identity() noexcept {
+void Settings::finalize_identity() noexcept {
     if (hostname.empty()) {
-        (void)hostname.assign(kDefaultHostname);
+        hostname = std::string(kDefaultHostname);
     }
-    if (!instance_name_explicit_) {
-        (void)instance_name.assign(hostname.view());
+    if (!instance_name_explicit) {
+        instance_name = hostname;
     }
     if (!has_instance_id) {
         fill_random(instance_id);
@@ -163,23 +93,36 @@ void Config::finalize_identity() noexcept {
     }
 }
 
+/** @brief 用 0 覆写内容并释放容量，避免密钥残留在堆中。 */
+void zeroize_string(std::string& text) noexcept {
+    for (char& c : text) {
+        c = '\0';
+    }
+    text.clear();
+    std::string().swap(text);
+}
+
+// ---------------------------------------------------------------------------
+// ConfigReport：诊断
+// ---------------------------------------------------------------------------
+
 /** @brief 清空诊断报告。 */
-void Config::clear_report() noexcept {
-    report_.count = 0;
-    report_.omitted_count = 0;
-    for (ConfigDiagnostic& d : report_.items) {
+void ConfigReport::clear() noexcept {
+    count = 0;
+    omitted_count = 0;
+    for (ConfigDiagnostic& d : items) {
         d = ConfigDiagnostic{};
     }
 }
 
 /** @brief 追加一条诊断；只记录字段路径，不记录取值。 */
-void Config::add_diagnostic(ConfigIssue issue, uint32_t line, uint32_t column,
-                            std::string_view key) noexcept {
-    if (report_.count >= kMaxDiagnostics) {
-        ++report_.omitted_count;
+void ConfigReport::add(ConfigIssue issue, uint32_t line, uint32_t column,
+                       std::string_view key) noexcept {
+    if (count >= kMaxDiagnostics) {
+        ++omitted_count;
         return;
     }
-    ConfigDiagnostic& d = report_.items[report_.count++];
+    ConfigDiagnostic& d = items[count++];
     d.issue = issue;
     d.line = line;
     d.column = column;
@@ -188,34 +131,6 @@ void Config::add_diagnostic(ConfigIssue issue, uint32_t line, uint32_t column,
         d.key[i] = key[i];
     }
     d.key[n] = '\0';
-}
-
-/** @brief 记录错误码（保留首个非 OK 的值）。 */
-void Config::set_error(esp_err_t err) noexcept {
-    if (err != ESP_OK && last_error_ == ESP_OK) {
-        last_error_ = err;
-    }
-}
-
-/**
- * @brief 用 TOML 文本全量替换配置。
- * @details 先复位为缺省值，再逐字段解析，最后重新补齐身份——因此未在 TOML 里显式给出的
- *          instance_id 会在每次 init 时重新生成，上一次的残留不会影响本次结果。
- *          失败时已解析的字段保留，错误码写入 last_error。
- */
-esp_err_t Config::init(std::string_view toml) noexcept {
-    reset_to_defaults();
-    last_error_ = ESP_OK;
-    const esp_err_t err = parse_toml_into(*this, toml);
-    // 即使解析失败也补齐身份，保证对象至少是可用的。
-    finalize_identity();
-    set_error(err);
-    return err;
-}
-
-/** @brief 用 TOML 文本构造（转发到 init，错误记录在对象内）。 */
-Config::Config(std::string_view toml) noexcept {
-    (void)init(toml);
 }
 
 // ---------------------------------------------------------------------------
@@ -329,11 +244,11 @@ bool parse_uuid_text(std::string_view text, std::array<uint8_t, 16>& out) noexce
  * @brief 按上游规则规范化主机名。
  * @details 剔除控制字符、最多保留 32 个 Unicode 码点；遇到非法 UTF-8 即停止（与上游
  *          逐字符过滤的语义一致）。32 码点 × 最多 4 字节 = 128 字节，因此这里用一个
- *          有界的栈缓冲暂存后一次性写入 @p out ；字段本身没有固定容量限制。
+ *          有界的栈缓冲暂存后一次性写入 @p out 。
  */
-esp_err_t normalize_hostname(std::string_view in, TextBuffer& out) noexcept {
-    // 32 个码点在 UTF-8 下最多 128 字节，加结尾 NUL 共 129。
-    std::array<char, 32 * 4 + 1> staging{};
+void normalize_hostname(std::string_view in, std::string& out) noexcept {
+    // 32 个码点在 UTF-8 下最多 128 字节；暂存缓冲不需要结尾 NUL（用长度赋值）。
+    std::array<char, 32 * 4> staging{};
     size_t written = 0;
     size_t code_points = 0;
     size_t i = 0;
@@ -350,15 +265,14 @@ esp_err_t normalize_hostname(std::string_view in, TextBuffer& out) noexcept {
             break;
         }
         const size_t len = i - start;
-        if (written + len >= staging.size()) {
+        if (written + len > staging.size()) {
             break;
         }
         std::memcpy(staging.data() + written, in.data() + start, len);
         written += len;
         ++code_points;
     }
-    staging[written] = '\0';
-    return out.assign(std::string_view(staging.data(), written));
+    out.assign(staging.data(), written);
 }
 
 /** @brief 取 IPv4 网络号（prefix 为 0 时返回 0）。 */
@@ -428,7 +342,7 @@ bool parse_peer_endpoint(std::string_view uri, std::string_view& host_out,
  *          每个入口都有主机名与端口。入口数量本身没有上限，只有可同时连接的数量由
  *          Kconfig 决定（见 kMaxConnectedPeers）。
  */
-esp_err_t validate_config(const Config& cfg) noexcept {
+esp_err_t validate_config(const Settings& cfg) noexcept {
     if (cfg.peers.size() == 0) {
         ET_LOGE(kTag, "no usable entry peer configured");
         return ESP_ERR_INVALID_ARG;
