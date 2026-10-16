@@ -43,11 +43,6 @@ menu "EasyTier-ESP"
         range 1 8
         default 2
 
-    config EASYTIER_ESP_TOML_HEAP_BUDGET
-        int "单次 TOML 解析允许申请的堆字节上限"
-        range 16384 1048576
-        default 262144
-
     menu "队列深度"
 
         config EASYTIER_ESP_QUEUE_RX_CTRL_DEPTH

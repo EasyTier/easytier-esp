@@ -16,13 +16,6 @@
 
 namespace et {
 
-/** @brief 单次 TOML 解析允许累计申请的堆字节上限（硬上限，不是估算值）。 */
-#if defined(CONFIG_EASYTIER_ESP_TOML_HEAP_BUDGET)
-inline constexpr size_t kTomlHeapBudget = CONFIG_EASYTIER_ESP_TOML_HEAP_BUDGET;
-#else
-inline constexpr size_t kTomlHeapBudget = 256 * 1024;
-#endif
-
 /** @brief 同时连接的入口节点数上限（超出部分的入口作为轮换备用）。 */
 #if defined(CONFIG_EASYTIER_ESP_MAX_CONNECTED_PEERS)
 inline constexpr size_t kMaxConnectedPeers = CONFIG_EASYTIER_ESP_MAX_CONNECTED_PEERS;
@@ -100,8 +93,6 @@ inline constexpr size_t kTomlMaxTableKeys = 256;
 // 代码真正能处理的区间再钉一遍：越界会让固件**编译失败**，而不是在运行期以越界/溢出
 // 的形式暴露。
 // ---------------------------------------------------------------------------
-static_assert(kTomlHeapBudget >= 16 * 1024, "TOML 堆预算过小");
-static_assert(kTomlHeapBudget <= 1024 * 1024, "TOML 堆预算过大");
 static_assert(kRpcMaxTransactions >= 1 && kRpcMaxTransactions <= 16,
               "RPC 事务上限必须落在 [1,16]");
 static_assert(kRpcReassemblySlots >= 1 && kRpcReassemblySlots <= 8,

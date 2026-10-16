@@ -12,7 +12,6 @@
 
 #include <atomic>
 #include <cstdio>
-#include <cstdlib>
 #include <cstring>
 
 #include "support/config_limits.hpp"
@@ -28,21 +27,11 @@ namespace {
 constexpr const char* kTag = "ET.TOML";
 
 /**
- * @brief TOML 解析器分配预算状态。
- * @note 解析预算与 tomlc17 的全局 allocator 都是**进程级**状态（组件内没有按实例
- *       隔离的解析器），因此解析必须串行；@ref g_parse_busy 会在有解析进行中时
- *       直接拒绝第二次调用，避免多实例并发解析破坏预算统计。
+ * @brief 解析串行化标记。
+ * @note tomlc17 的 `toml_option`（UTF-8 校验 / 分配器）是**进程级**全局状态，首次
+ *       安装必须串行；组件也按"Inst 构造串行"的约定，同一时刻只允许一次解析，
+ *       有解析进行中时直接拒绝第二次调用。
  */
-struct BudgetState {
-    size_t limit = 0;      ///< 累计分配上限
-    size_t used = 0;       ///< 本次解析累计分配字节数
-    bool exceeded = false;  ///< 是否已超预算
-    bool active = false;    ///< 是否处于一次解析中
-};
-
-BudgetState g_budget;
-
-/// 解析串行化标记：非零表示已有一次解析在进行。
 std::atomic_flag g_parse_busy;
 
 /** @brief 离开作用域时释放解析串行化标记（覆盖所有返回路径）。 */
@@ -51,28 +40,9 @@ struct ParseBusyGuard {
 };
 
 /**
- * @brief 预算分配器。
- * @details 以"累计申请字节数"作为上限，是峰值占用的保守上界（只多不少），
- *          并且不依赖 realloc 旧长度信息。
- */
-void* budget_realloc(void* ptr, size_t size) noexcept {
-    if (g_budget.active) {
-        g_budget.used += size;
-        if (g_budget.used > g_budget.limit) {
-            g_budget.exceeded = true;
-            return nullptr;
-        }
-    }
-    return std::realloc(ptr, size);
-}
-
-/** @brief 释放回调（预算只统计申请量，不做扣减）。 */
-void budget_free(void* ptr) noexcept { std::free(ptr); }
-
-/**
  * @brief 首次加载时安装解析器全局选项。
- * @details 选项安装后不再修改，因此不存在并发改写问题；并发解析由
- *          @ref g_parse_busy 在 @ref parse_toml_into 入口处拒绝。同时启用 UTF-8 校验。
+ * @details 只启用 UTF-8 校验，分配器沿用 tomlc17 默认的 `realloc`/`free`；分配失败由
+ *          解析器自身以 "out of memory" 报错，再由调用方映射为 `ESP_ERR_NO_MEM`。
  */
 void ensure_parser_options() noexcept {
     static bool installed = false;
@@ -81,8 +51,6 @@ void ensure_parser_options() noexcept {
     }
     toml_option_t opt = et_toml_default_option();
     opt.check_utf8 = true;
-    opt.mem_realloc = budget_realloc;
-    opt.mem_free = budget_free;
     et_toml_set_option(opt);
     installed = true;
 }
@@ -445,25 +413,17 @@ esp_err_t parse_toml_into(Settings& out, ConfigReport& report, std::string_view 
         return ESP_ERR_NO_MEM;
     }
 
-    // 解析预算与分配器是进程级状态：已有解析进行中时直接拒绝，避免并发解析互相
-    // 破坏预算统计（多实例场景下应用可能从两个任务并发构造 Inst）。
+    // tomlc17 的全局选项是进程级状态：已有解析进行中时直接拒绝，保证首次安装串行，
+    // 也符合"Inst 构造串行"的约定（多实例场景下不应从两个任务并发构造）。
     if (g_parse_busy.test_and_set()) {
         ET_LOGE(kTag, "another TOML parse is in progress; Inst construction must be serialized");
         return ESP_ERR_INVALID_STATE;
     }
     const ParseBusyGuard busy_guard{};
     ensure_parser_options();
-    g_budget.limit = kTomlHeapBudget;
-    g_budget.used = 0;
-    g_budget.exceeded = false;
-    g_budget.active = true;
 
     const toml_result_t result =
         et_toml_parse_named(text.data(), static_cast<int>(text.size()), "easytier.toml");
-
-    g_budget.active = false;
-    const bool budget_exceeded = g_budget.exceeded;
-    const size_t budget_used = g_budget.used;
 
     if (!result.ok) {
         // 只提取位置，不回显解析器原始错误文本（其中可能带配置值或密钥）。
@@ -471,7 +431,7 @@ esp_err_t parse_toml_into(Settings& out, ConfigReport& report, std::string_view 
         (void)std::sscanf(result.errmsg, "(line %d)", &error_line);
         toml_datum_t location{};
         location.lineno = error_line;
-        const bool resource_error = budget_exceeded ||
+        const bool resource_error =
             std::strstr(result.errmsg, "out of memory") != nullptr ||
             std::strstr(result.errmsg, "too many key parts") != nullptr ||
             std::strstr(result.errmsg, "stack overflow") != nullptr;
@@ -479,8 +439,7 @@ esp_err_t parse_toml_into(Settings& out, ConfigReport& report, std::string_view 
         add_diag(report, resource_error ? ConfigIssue::ResourceLimit : ConfigIssue::SyntaxError,
                  location, "toml");
         if (resource_error) {
-            ET_LOGE(kTag, "TOML parser resource limit (heap budget %u bytes)",
-                    static_cast<unsigned>(kTomlHeapBudget));
+            ET_LOGE(kTag, "TOML parser out of resource (allocation or nesting limits)");
             return ESP_ERR_NO_MEM;
         }
         ET_LOGE(kTag, "TOML syntax error at line %u", static_cast<unsigned>(error_line));
@@ -569,8 +528,7 @@ esp_err_t parse_toml_into(Settings& out, ConfigReport& report, std::string_view 
     if (err != ESP_OK) {
         return err;
     }
-    (void)budget_used;
-    ET_LOGD(kTag, "TOML parsed, heap %u bytes", static_cast<unsigned>(budget_used));
+    ET_LOGD(kTag, "TOML parsed");
     // 与上游空配置/空 peer 列表语义一致：解析成功不代表网络已具备可用路由。
     // TOML 入口按逐字段提取契约返回成功；结构完整性由 et::Inst 构造时校验。
     return ESP_OK;
