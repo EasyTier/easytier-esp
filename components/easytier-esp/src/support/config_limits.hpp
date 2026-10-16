@@ -51,6 +51,48 @@ inline constexpr size_t kRpcReassemblySlots = CONFIG_EASYTIER_ESP_RPC_REASSEMBLY
 inline constexpr size_t kRpcReassemblySlots = 2;
 #endif
 
+// ---------------------------------------------------------------------------
+// 队列深度（Kconfig menu "队列深度"；每帧约 2 KiB，扩大即增加常驻堆内存）
+// ---------------------------------------------------------------------------
+
+/** @brief I/O → 控制面的帧队列深度（`q_rx_ctrl`）。 */
+#if defined(CONFIG_EASYTIER_ESP_QUEUE_RX_CTRL_DEPTH)
+inline constexpr size_t kQueueRxCtrlDepth = CONFIG_EASYTIER_ESP_QUEUE_RX_CTRL_DEPTH;
+#else
+inline constexpr size_t kQueueRxCtrlDepth = 8;
+#endif
+
+/** @brief 控制面/数据面 → I/O 的发送队列深度（`q_tx`）。 */
+#if defined(CONFIG_EASYTIER_ESP_QUEUE_TX_DEPTH)
+inline constexpr size_t kQueueTxDepth = CONFIG_EASYTIER_ESP_QUEUE_TX_DEPTH;
+#else
+inline constexpr size_t kQueueTxDepth = 8;
+#endif
+
+/** @brief I/O → 数据面的 Data 帧队列深度（`q_rx_data`）。 */
+#if defined(CONFIG_EASYTIER_ESP_QUEUE_RX_DATA_DEPTH)
+inline constexpr size_t kQueueRxDataDepth = CONFIG_EASYTIER_ESP_QUEUE_RX_DATA_DEPTH;
+#else
+inline constexpr size_t kQueueRxDataDepth = 8;
+#endif
+
+/** @brief 事件/命令小消息队列深度（`q_evt` / `q_io_cmd` / `q_app_cmd`）。 */
+#if defined(CONFIG_EASYTIER_ESP_QUEUE_SMALL_DEPTH)
+inline constexpr size_t kQueueSmallDepth = CONFIG_EASYTIER_ESP_QUEUE_SMALL_DEPTH;
+#else
+inline constexpr size_t kQueueSmallDepth = 8;
+#endif
+
+/** @brief TCPIP 线程 → 数据面的 pbuf 队列深度（`q_netif_rx`）。 */
+#if defined(CONFIG_EASYTIER_ESP_QUEUE_NETIF_DEPTH)
+inline constexpr size_t kQueueNetifDepth = CONFIG_EASYTIER_ESP_QUEUE_NETIF_DEPTH;
+#else
+inline constexpr size_t kQueueNetifDepth = 16;
+#endif
+
+/** @brief 路由快照队列深度：固定 1（"只保留最新快照"的覆盖语义，不提供 Kconfig）。 */
+inline constexpr size_t kQueueSnapshotDepth = 1;
+
 /** @brief TOML 语法树节点数上限。 */
 inline constexpr size_t kTomlMaxNodes = 1024;
 /** @brief 单个 TOML 数组的元素数上限。 */
@@ -75,5 +117,15 @@ static_assert(kRpcReassemblySlots >= 1 && kRpcReassemblySlots <= 8,
               "RPC 重组槽必须落在 [1,8]（每槽约 16 KiB）");
 static_assert(kMaxConnectedPeers >= 1 && kMaxConnectedPeers <= 8,
               "同时连接的入口数必须落在 [1,8]（每槽约 12 KiB 收发缓冲）");
+static_assert(kQueueRxCtrlDepth >= 1 && kQueueRxCtrlDepth <= 32,
+              "q_rx_ctrl 深度必须落在 [1,32]（每元素约 2 KiB）");
+static_assert(kQueueTxDepth >= 1 && kQueueTxDepth <= 32,
+              "q_tx 深度必须落在 [1,32]（每元素约 2 KiB）");
+static_assert(kQueueRxDataDepth >= 1 && kQueueRxDataDepth <= 32,
+              "q_rx_data 深度必须落在 [1,32]（每元素约 2 KiB）");
+static_assert(kQueueSmallDepth >= 1 && kQueueSmallDepth <= 32,
+              "事件/命令队列深度必须落在 [1,32]");
+static_assert(kQueueNetifDepth >= 1 && kQueueNetifDepth <= 64,
+              "q_netif_rx 深度必须落在 [1,64]");
 
 }  // namespace et

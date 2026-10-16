@@ -39,8 +39,6 @@ namespace {
 
 constexpr const char* kTag = "ET.INSTANCE";
 
-/** @brief 队列深度（帧队列容量有限，形成背压）。 */
-constexpr UBaseType_t kFrameQueueDepth = 4;
 // 单个实例的常驻内存必须保持有界：Context 在堆上分配（大于 16 KiB 的分配会走
 // PSRAM），但仍要有上限，避免后续加入功能时悄悄膨胀。实测组成（ESP32-S3，字节）：
 //   Context 合计 92800（不再包含 4.5 KiB 的解析诊断报告，报告由 Inst 自己持有）
@@ -51,16 +49,13 @@ constexpr UBaseType_t kFrameQueueDepth = 4;
 //     └─ 其它（AEAD 指针、原子量、dhcp/网卡状态等）
 // 入口地址列表与实例名/主机名/网络名/网络密钥都由 std::string/vector 按实际长度在堆上分配，
 // 因此这些文本写多长都不会让 Context 膨胀。
-// 另外每个实例还有：帧队列 4×2008×3 ≈ 24 KiB、每个连接槽一个 TcpConn 约 12 KiB（堆，
-// 数量见 Kconfig `EASYTIER_ESP_MAX_CONNECTED_PEERS`，默认 6）、
+// 另外每个实例还有：帧队列（q_rx_ctrl/q_tx/q_rx_data，深度见 Kconfig
+// `EASYTIER_ESP_QUEUE_*`，默认各 8，每元素约 2 KiB）、每个连接槽一个 TcpConn 约 12 KiB
+// （堆，数量见 Kconfig `EASYTIER_ESP_MAX_CONNECTED_PEERS`，默认 6）、
 // 三个任务栈 6+10+8 = 24 KiB。因此**强烈建议启用 PSRAM**（示例 sdkconfig 已启用，
 // 大于 16 KiB 的分配会落到 PSRAM）。新增缓冲时请同步更新本注释与 README 的内存表。
 static_assert(sizeof(Context) < 112 * 1024, "Context 常驻内存超出预算，请检查新增缓冲");
 
-/** @brief 事件/命令队列深度。 */
-constexpr UBaseType_t kSmallQueueDepth = 4;
-/** @brief TCPIP 线程 → 数据面的 pbuf 队列深度。 */
-constexpr UBaseType_t kNetifQueueDepth = 8;
 /** @brief I/O 任务栈（字节）。 */
 constexpr uint32_t kIoTaskStack = 6144;
 /** @brief 控制面任务栈（字节）。 */
@@ -100,19 +95,30 @@ void prepare_context(Context& ctx, const Settings& settings,
 /** @brief 创建队列与任务；失败时回滚已创建的资源。 */
 esp_err_t start_runtime(Context& ctx) noexcept {
     if (ctx.q_rx_ctrl == nullptr) {
-        ctx.q_rx_ctrl = xQueueCreate(kFrameQueueDepth, sizeof(FrameMessage));
-        ctx.q_tx = xQueueCreate(kFrameQueueDepth, sizeof(FrameMessage));
-        ctx.q_evt = xQueueCreate(kSmallQueueDepth, sizeof(SmallMessage));
-        ctx.q_io_cmd = xQueueCreate(kSmallQueueDepth, sizeof(SmallMessage));
-        ctx.q_app_cmd = xQueueCreate(kSmallQueueDepth, sizeof(SmallMessage));
-        ctx.q_rx_data = xQueueCreate(kFrameQueueDepth, sizeof(FrameMessage));
-        ctx.q_netif_rx = xQueueCreate(kNetifQueueDepth, sizeof(NetifRxItem));
-        ctx.q_snapshot = xQueueCreate(1, sizeof(RouteSnapshot));
+        // 队列深度来自 Kconfig menu "队列深度"（宿主默认值同 config_limits.hpp）。
+        // 注意 q_snapshot 固定深度 1：它是"只保留最新路由快照"的覆盖语义。
+        ctx.q_rx_ctrl = xQueueCreate(static_cast<UBaseType_t>(kQueueRxCtrlDepth),
+                                     sizeof(FrameMessage));
+        ctx.q_tx = xQueueCreate(static_cast<UBaseType_t>(kQueueTxDepth), sizeof(FrameMessage));
+        ctx.q_evt = xQueueCreate(static_cast<UBaseType_t>(kQueueSmallDepth),
+                                 sizeof(SmallMessage));
+        ctx.q_io_cmd = xQueueCreate(static_cast<UBaseType_t>(kQueueSmallDepth),
+                                    sizeof(SmallMessage));
+        ctx.q_app_cmd = xQueueCreate(static_cast<UBaseType_t>(kQueueSmallDepth),
+                                     sizeof(SmallMessage));
+        ctx.q_rx_data = xQueueCreate(static_cast<UBaseType_t>(kQueueRxDataDepth),
+                                     sizeof(FrameMessage));
+        ctx.q_netif_rx = xQueueCreate(static_cast<UBaseType_t>(kQueueNetifDepth),
+                                      sizeof(NetifRxItem));
+        ctx.q_snapshot = xQueueCreate(static_cast<UBaseType_t>(kQueueSnapshotDepth),
+                                      sizeof(RouteSnapshot));
         ctx.task_exit = xSemaphoreCreateCounting(kTaskCount, 0);
         if (ctx.q_rx_ctrl == nullptr || ctx.q_tx == nullptr || ctx.q_evt == nullptr ||
             ctx.q_io_cmd == nullptr || ctx.q_app_cmd == nullptr || ctx.q_rx_data == nullptr ||
             ctx.q_netif_rx == nullptr || ctx.q_snapshot == nullptr || ctx.task_exit == nullptr) {
-            ET_LOGE(kTag, "queue/semaphore allocation failed (need ~24 KiB of heap)");
+            ET_LOGE(kTag,
+                    "queue/semaphore allocation failed; lower the depths in Kconfig "
+                    "menu \"队列深度\" or enable PSRAM");
             return ESP_ERR_NO_MEM;
         }
     }
@@ -161,11 +167,14 @@ esp_err_t start_runtime(Context& ctx) noexcept {
     ctx.my_ipv4.store(ctx.settings.has_static_ipv4 ? ctx.settings.static_ipv4 : 0);
     ctx.my_prefix.store(ctx.settings.has_static_ipv4 ? ctx.settings.static_prefix : 24);
     ctx.reachable_routes.store(0);
-    // 打印常驻内存规模与并发连接槽数，便于真机 bring-up 时核对 Kconfig 是否生效。
-    ET_LOGI(kTag, "runtime context: %u bytes; slots: %u; frame queues: ctrl=%u data=%u tx=%u",
+    // 打印常驻内存规模、连接槽数与各队列深度，便于真机 bring-up 时核对 Kconfig 是否生效。
+    ET_LOGI(kTag,
+            "runtime context: %u bytes; slots: %u; queues: rx_ctrl=%u tx=%u rx_data=%u "
+            "small=%u netif=%u",
             static_cast<unsigned>(sizeof(Context)), static_cast<unsigned>(kMaxConnSlots),
-            static_cast<unsigned>(kFrameQueueDepth), static_cast<unsigned>(kFrameQueueDepth),
-            static_cast<unsigned>(kFrameQueueDepth));
+            static_cast<unsigned>(kQueueRxCtrlDepth), static_cast<unsigned>(kQueueTxDepth),
+            static_cast<unsigned>(kQueueRxDataDepth), static_cast<unsigned>(kQueueSmallDepth),
+            static_cast<unsigned>(kQueueNetifDepth));
     // 静态地址时立即可用；dhcp 地址在控制面算出后再创建网卡。
     // 与物理网段重叠的虚拟网段会破坏正常路由，这里显式拒绝（见 proto_task 的同名检查）。
     if (ctx.settings.has_static_ipv4) {

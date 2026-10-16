@@ -277,14 +277,24 @@ void start_easytier() {
 | `EASYTIER_ESP_TOML_HEAP_BUDGET` | 262144 | 单次 TOML 解析允许累计申请的堆字节上限 |
 | `EASYTIER_ESP_RPC_MAX_TRANSACTIONS` | 4 | 并发 RPC 事务上限 |
 | `EASYTIER_ESP_RPC_REASSEMBLY_SLOTS` | 2 | RPC 分片重组槽数量（每槽约 16 KiB） |
+| `EASYTIER_ESP_QUEUE_RX_CTRL_DEPTH` | 8 | I/O → 控制面的帧队列 `q_rx_ctrl` 深度（1..32，每元素约 2 KiB） |
+| `EASYTIER_ESP_QUEUE_TX_DEPTH` | 8 | 控制面/数据面 → I/O 的发送队列 `q_tx` 深度（1..32，每元素约 2 KiB） |
+| `EASYTIER_ESP_QUEUE_RX_DATA_DEPTH` | 8 | I/O → 数据面的 `q_rx_data` 深度（1..32，每元素约 2 KiB） |
+| `EASYTIER_ESP_QUEUE_SMALL_DEPTH` | 8 | 事件/命令队列 `q_evt`/`q_io_cmd`/`q_app_cmd` 共用深度（1..32） |
+| `EASYTIER_ESP_QUEUE_NETIF_DEPTH` | 16 | TCPIP → 数据面的 pbuf 队列 `q_netif_rx` 深度（1..64） |
 
-宿主测试没有 sdkconfig，使用 `support/config_limits.hpp` 里的同一批默认值；`tests/host/test_config_limits.cpp`
-把"宿主默认值 == Kconfig 默认值"固定下来，避免两端行为漂移。
+> 队列深度单列在 menuconfig 的 **EasyTier-ESP → 队列深度** 菜单里；每加深一格，
+> 帧队列就多占约 2 KiB 常驻堆内存（`q_snapshot` 固定深度 1，不提供选项）。
+> 旧版本的帧队列默认是 4，突发路由同步/RPC 下容易溢出（丢帧并计入 `dropped`），
+> 因此新默认调到 8；内存紧张或流量很大时按需增减。
+
+宿主构建没有 sdkconfig，使用 `support/config_limits.hpp` 里的同一批默认值
+（Kconfig 的 `range` 之外还有 `static_assert` 兜底，越界会让固件编译失败）。
 
 ## 内存预算（实测，ESP32-S3）
 
 下表是**单个 `et::Inst` 实例**的开销。多个实例并存时，`Context`、帧队列、连接槽与任务栈
-都按实例数量线性叠加（每实例约 91 KiB 常驻 + 约 24 KiB 队列 + 连接槽 + 24 KiB 任务栈）。
+都按实例数量线性叠加（每实例约 91 KiB 常驻 + 约 48 KiB 队列 + 连接槽 + 24 KiB 任务栈）。
 
 | 项目 | 大小 | 说明 |
 | --- | --- | --- |
@@ -292,7 +302,9 @@ void start_easytier() {
 | `Inst` 对象本体 | 约 4.5 KiB | 私有 `Context*` + `bool started_` + `ConfigReport`（约 4.5 KiB 解析诊断）；设置项与运行状态在堆上的 `Context` 内 |
 | `Settings` 文本字段（堆） | 按实际长度 | 实例名 / 主机名 / 网络名 / 网络密钥都是 `std::string`（短字段走 SSO），**长度无固定上限** |
 | 入口地址列表（堆） | 每条约 32 B + 主机文本 | `std::vector<PeerEndpoint>`，按配置实际条数分配；条目数量无上限 |
-| 帧队列 | 约 24 KiB | 控制面 / 数据面 / 发送队列各 4 × 2008 B |
+| 帧队列 `q_rx_ctrl`/`q_tx`/`q_rx_data` | 默认约 47 KiB | 深度各 8（Kconfig `EASYTIER_ESP_QUEUE_*_DEPTH`）× 约 2 KiB；深度可直接换算成常驻内存 |
+| 事件/命令队列 `q_evt`/`q_io_cmd`/`q_app_cmd` | 默认约 192 B | 深度各 8 × `SmallMessage` 8 B |
+| 网卡出站队列 `q_netif_rx` + 快照 `q_snapshot` | 默认约 0.7 KiB | `q_netif_rx` 深度 16 × `NetifRxItem` 8 B；`q_snapshot` 固定深度 1 |
 | `TcpConn`（堆） | 约 12 KiB × 连接数 | 每槽一份收发缓冲，槽数见 `EASYTIER_ESP_MAX_CONNECTED_PEERS`（默认 6） |
 | 任务栈 | 24 KiB | I/O 6 KiB + 控制面 10 KiB + 数据面 8 KiB |
 | TOML 解析 | ≤ 256 KiB（瞬时） | 受 `EASYTIER_ESP_TOML_HEAP_BUDGET` 限制 |

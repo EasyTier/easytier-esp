@@ -53,4 +53,51 @@ menu "EasyTier-ESP"
         range 16384 1048576
         default 262144
 
+    menu "队列深度"
+
+        config EASYTIER_ESP_QUEUE_RX_CTRL_DEPTH
+            int "控制面接收队列 q_rx_ctrl"
+            range 1 32
+            default 8
+            help
+                I/O 任务 → 控制面的帧队列。每个元素是一个 FrameMessage（约 2 KiB），
+                因此常驻堆内存 ≈ 深度 × 2 KiB；队列满时控制面会丢帧并计入 dropped。
+                旧默认 4 在突发路由同步/RPC 下容易溢出，现默认 8。
+
+        config EASYTIER_ESP_QUEUE_TX_DEPTH
+            int "发送队列 q_tx"
+            range 1 32
+            default 8
+            help
+                控制面 / 数据面 → I/O 任务的发送队列。TCP 写入跟不上时帧会在此积压，
+                队列满即丢帧；每个元素约 2 KiB。旧默认 4，现默认 8。
+
+        config EASYTIER_ESP_QUEUE_RX_DATA_DEPTH
+            int "数据面接收队列 q_rx_data"
+            range 1 32
+            default 8
+            help
+                I/O 任务 → 数据面的 Data 帧队列。每个元素约 2 KiB；旧默认 4，现默认 8。
+
+        config EASYTIER_ESP_QUEUE_SMALL_DEPTH
+            int "事件/命令队列 q_evt / q_io_cmd / q_app_cmd"
+            range 1 32
+            default 8
+            help
+                三个小消息队列（连接事件、重连命令、物理网络状态）共用的深度，元素是
+                SmallMessage（约 8 B）。深度过小会让 underlay 状态或重连命令入队失败。
+
+        config EASYTIER_ESP_QUEUE_NETIF_DEPTH
+            int "虚拟网卡出站队列 q_netif_rx"
+            range 1 64
+            default 16
+            help
+                TCPIP 线程 → 数据面的 pbuf 队列，元素是 NetifRxItem（约 8 B，持有 pbuf
+                引用）。深度过小时 TCPIP 线程的零等待入队会失败并按丢包处理。
+
+        # 注意：q_snapshot（控制面 → 数据面的路由快照）按设计固定深度 1——
+        # 它是"只保留最新快照"的覆盖语义，不提供 Kconfig 选项。
+
+    endmenu
+
 endmenu
