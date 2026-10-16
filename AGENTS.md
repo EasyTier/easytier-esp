@@ -9,7 +9,7 @@
 
 ## 项目定位与目录
 
-本项目把 ESP32 接入既有 EasyTier 网络，组件只适配 **ESP-IDF 6.1.x**，当前目标为 ESP32-S3。C++20，命名空间 `et`。**公开 API 只有一个类 `et::Inst`**（RAII）：构造函数直接接收 TOML 文本，内部完成解析、身份补齐、结构校验与资源分配（上下文、队列、任务、socket、虚拟网卡），析构自动停止并释放。**没有独立的配置类**：全部设置项是实例的私有实现（`src/config/settings.hpp` 的内部 `Settings`，用 `std::string`/`std::vector`），构造后不可修改，只能通过 `get_config_info()` 读生效配置快照。**解析诊断不缓存**：无法采用的非 peer 字段用 Warn 日志、真正的失败用 Error 日志直接输出，接口只返回错误码。**允许多个 `et::Inst` 并存**，组件内部不得引入文件级实例状态；**不要引入 C 包装层或 `Node` 层**。配置**只走 TOML**：不要加编程式 setter；每次构造都是“缺省值 + TOML”的全量替换，因此未显式给出的 `instance_id`/`hostname`/`instance_name` 每次都会重新生成。组件禁用异常与 RTTI，构造不能返回错误码，失败用 `valid()`/`last_error()` 查询；设置文本用 `std::string`，分配失败会终止进程（不再有字段级 `ESP_ERR_NO_MEM`）。
+本项目把 ESP32 接入既有 EasyTier 网络，组件只适配 **ESP-IDF 6.1.x**，当前目标为 ESP32-S3。C++20，命名空间 `et`。**公开 API 只有一个类 `et::Inst`**（RAII）：构造函数直接接收 TOML 文本，内部完成解析、身份补齐、结构校验与资源分配（上下文、队列、任务、socket、虚拟网卡），析构自动停止并释放。**没有独立的配置类**：全部设置项是实例的私有实现（`src/config/settings.hpp` 的内部 `Settings`，用 `std::string`/`std::vector`），构造后不可修改，只能通过 `get_config_info()` 读生效配置快照。**解析诊断不缓存**：真正失败（支持的字段类型/取值错误、peer 非法、语法/资源超限）用 Error 日志直接输出，接口只返回错误码；不支持的字段不解析也不报错。**允许多个 `et::Inst` 并存**，组件内部不得引入文件级实例状态；**不要引入 C 包装层或 `Node` 层**。配置**只走 TOML**：不要加编程式 setter；每次构造都是“缺省值 + TOML”的全量替换，因此未显式给出的 `instance_id`/`hostname`/`instance_name` 每次都会重新生成。组件禁用异常与 RTTI，构造不能返回错误码，失败用 `valid()`/`last_error()` 查询；设置文本用 `std::string`，分配失败会终止进程（不再有字段级 `ESP_ERR_NO_MEM`）。
 
 - `components/easytier-esp/include/easytier-esp.h`：公开 C++ API、配置、状态、事件和诊断。
 - `components/easytier-esp/src/`：组件实现；`config/`、`crypto/`、`protocol/`、`transport/`、`peer/`、`rpc/`、`route/`、`netif/`、`data/`、`tasks/` 为主要模块。
@@ -24,7 +24,7 @@
 
 本机上游源码在 `~/Desktop/EasyTier/`。变更协议、默认值或配置语义时读取当前源码，不凭旧总结推断。当前上游配置入口主要在 `easytier-core/src/config/toml.rs`，运行期 Host 归一化在 `easytier-core/src/instance/config.rs`；旧路径可能仅作 re-export。
 
-- TOML：采用支持且有效的非 peer 字段；未知、无关或无法采用的非 peer 字段忽略并报告，不因缺少入口/地址拒绝解析。真正语法错误、读取失败、解析资源耗尽分别报告。
+- TOML（与上游 `toml.rs` 的 serde 行为一致）：**支持的字段必须写对**——类型错误或取值非法（UUID/CIDR/MTU 越界/URI 非法等）一律让构造失败并打 Error 日志（唯一例外：`ipv4` 字符串内容无法解析时按上游 `get_ipv4().parse().ok()` 静默忽略）；**不支持的字段根本不解析也不报错**（未知键、上游有但本组件未实现的表/键）；缺失字段保留组件缺省值；语法错误与解析资源超限分别报告。不因缺少入口/地址拒绝解析（结构校验另算）。
 - **peer 只能多写附加字段，不能写错入口**：协议不支持、IPv6、无效 URI/主机/端口、错误类型、缺少 `uri` 必须报错，即使同时有其他有效入口。**TOML 是唯一配置入口**（没有编程式 setter），入口 URI 校验只有这一份。入口条目数**没有上限**（按实际条数分配），只有可同时连接的数量受 Kconfig 限制。
 - 缺省网络名为 `default`，网络密钥为空，MTU 为 1380，静态 IPv4 与 peer 列表缺省为空，DHCP 缺省关闭。DHCP 自举回落子网为 `10.126.126.0/24`，可以优先采用网络中宣告的网段。缺省 `instance_name` **取 hostname**（不再固定为 `default`）。
 - 缺省实例 UUID 在构造 `et::Inst` 时生成并缓存 UUID v4；显式 UUID（包括全零 UUID）不得被覆盖。主机名遵循“有效显式值优先，否则 Host fallback”，ESP fallback 按用户要求为 **`Espressif`**。

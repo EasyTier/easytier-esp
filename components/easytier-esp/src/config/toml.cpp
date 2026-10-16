@@ -5,8 +5,9 @@
  * @details 关键点：
  * - 使用 tomlc17 默认分配器（不做堆预算），分配失败由解析器以 "out of memory" 报错；
  * - 解析前后分别做嵌套深度预扫描与语法树结构校验，拒绝异常放大；
- * - 支持字段与上游同名同义，未实现字段用 Warn 日志"忽略"说明，不因未知内容拒绝配置；
- *   真正的失败（语法错误、入口非法、资源超限）用 Error 日志 + 返回错误码，**不缓存诊断**。
+ * - 字段策略与上游一致：**组件支持的字段必须写对**（类型/取值错误 → Error 日志 + 失败），
+ *   **不支持的字段根本不解析也不报错**（未知键、上游有但本组件未实现的字段）；
+ * - 不缓存任何诊断。
  */
 #include "config/toml.hpp"
 
@@ -53,24 +54,6 @@ void ensure_parser_options() noexcept {
     opt.check_utf8 = true;
     et_toml_set_option(opt);
     installed = true;
-}
-
-/**
- * @brief 记录一条被忽略的配置项（Warn 级，只记录字段路径，绝不记录取值）。
- * @param prefix 字段路径前缀（如 "flags."、"network_identity."，可为空）
- * @param name 字段名
- * @param at 该字段在 TOML 中的位置（用于行号；0 表示未知）
- */
-void log_ignored(std::string_view prefix, std::string_view name,
-                 const toml_datum_t& at) noexcept {
-    if (at.lineno > 0) {
-        ET_LOGW(kTag, "ignored config: %.*s%.*s (line %d)",
-                static_cast<int>(prefix.size()), prefix.data(),
-                static_cast<int>(name.size()), name.data(), at.lineno);
-    } else {
-        ET_LOGW(kTag, "ignored config: %.*s%.*s", static_cast<int>(prefix.size()),
-                prefix.data(), static_cast<int>(name.size()), name.data());
-    }
 }
 
 /** @brief 取字符串类型 datum 的视图；非字符串返回空视图。 */
@@ -129,49 +112,65 @@ void count_tree(const toml_datum_t& node, size_t depth, TreeStats& stats) noexce
     }
 }
 
-/** @brief 是否为需要按语义处理的根级键（其余键整体忽略并报告）。 */
-[[nodiscard]] bool is_known_root_key(std::string_view key) noexcept {
-    return key == "instance_name" || key == "hostname" || key == "instance_id" || key == "ipv4" ||
-           key == "dhcp" || key == "network_identity" || key == "peer" || key == "flags";
+/**
+ * @brief 严格读取可选字符串字段。
+ * @details 字段未提供 → 保持缺省值；字段存在但类型不是字符串（或含内嵌 NUL）→ 报错。
+ *          与上游一致：**支持的字段必须写对**，不支持的字段根本不解析。
+ * @return @c ESP_OK，或 @c ESP_ERR_INVALID_ARG
+ */
+esp_err_t read_optional_string(const toml_datum_t& top, const char* key,
+                               std::string_view& out) noexcept {
+    const toml_datum_t datum = et_toml_get(top, key);
+    if (datum.type == TOML_UNKNOWN) return ESP_OK;  // 未提供
+    if (datum.type != TOML_STRING || datum_sv(datum).find('\0') != std::string_view::npos) {
+        ET_LOGE(kTag, "config field '%s' must be a string", key);
+        return ESP_ERR_INVALID_ARG;
+    }
+    out = datum_sv(datum);
+    return ESP_OK;
 }
 
 /**
- * @brief 宽容读取可选字符串：类型不匹配只记日志忽略，绝不覆盖默认值。
- * @note 字段路径无法表示内嵌 NUL；这类合法 TOML 字符串也按不可采用处理。
+ * @brief 提取网络身份（上游 `network_identity` 表）。
+ * @details 与上游 `NetworkIdentity` 的 serde 定义一致：表一旦出现，`network_name` 就是
+ *          必填字符串（缺失即报错）；`network_secret` 可选。表内其它键（上游字段或未知键）
+ *          不解析、不报错。
  */
-std::string_view optional_string(const toml_datum_t& top, const char* key) noexcept {
-    const toml_datum_t datum = et_toml_get(top, key);
-    if (datum.type == TOML_UNKNOWN) return {};
-    if (datum.type != TOML_STRING || datum_sv(datum).find('\0') != std::string_view::npos) {
-        log_ignored({}, key, datum);
-        return {};
-    }
-    return datum_sv(datum);
-}
-
-/** @brief 按上游字段名提取网络身份；缺失或不能采用的字段分别保留默认值。 */
 esp_err_t map_network_identity(const toml_datum_t& top, Settings& out) noexcept {
     const toml_datum_t table = et_toml_get(top, "network_identity");
     if (table.type == TOML_UNKNOWN) return ESP_OK;
     if (table.type != TOML_TABLE) {
-        log_ignored({}, "network_identity", table);
-        return ESP_OK;
+        ET_LOGE(kTag, "config field 'network_identity' must be a table");
+        return ESP_ERR_INVALID_ARG;
     }
+    bool has_name = false;
     for (int32_t i = 0; i < table.u.tab.size; ++i) {
         const std::string_view name = table_key(table, i);
         const toml_datum_t datum = table.u.tab.value[i];
         const std::string_view value = datum_sv(datum);
-        bool adopted = false;
-        if (datum.type == TOML_STRING && value.find('\0') == std::string_view::npos) {
-            if (name == "network_name" && !value.empty()) {
-                out.network_name = value;
-                adopted = true;
-            } else if (name == "network_secret") {
-                out.network_secret = value;
-                adopted = true;
-            }
+        if (name != "network_name" && name != "network_secret") {
+            continue;  // 不支持的字段：不解析、不报错
         }
-        if (!adopted) log_ignored("network_identity.", name, datum);
+        if (datum.type != TOML_STRING || value.find('\0') != std::string_view::npos) {
+            ET_LOGE(kTag, "config field 'network_identity.%.*s' must be a string",
+                    static_cast<int>(name.size()), name.data());
+            return ESP_ERR_INVALID_ARG;
+        }
+        if (name == "network_name") {
+            if (value.empty()) {
+                ET_LOGE(kTag, "config field 'network_identity.network_name' must not be empty");
+                return ESP_ERR_INVALID_ARG;
+            }
+            out.network_name = value;
+            has_name = true;
+        } else {
+            out.network_secret = value;
+        }
+    }
+    if (!has_name) {
+        // 上游 NetworkIdentity::network_name 是必填字段（serde 会报 missing field）。
+        ET_LOGE(kTag, "config field 'network_identity.network_name' is required");
+        return ESP_ERR_INVALID_ARG;
     }
     return ESP_OK;
 }
@@ -194,11 +193,7 @@ esp_err_t map_peers(const toml_datum_t& top, Settings& out) noexcept {
             ET_LOGE(kTag, "peer[%d] must be a table", static_cast<int>(i));
             return ESP_ERR_INVALID_ARG;
         }
-        for (int32_t k = 0; k < entry.u.tab.size; ++k) {
-            const auto name = table_key(entry, k);
-            if (name == "uri") continue;
-            log_ignored("peer.", name, entry.u.tab.value[k]);
-        }
+        // 入口表里除 uri 之外的键（上游字段或未知键）不解析、不报错。
         const toml_datum_t uri = et_toml_get(entry, "uri");
         std::string_view host{};
         uint16_t port = 0;
@@ -216,60 +211,78 @@ esp_err_t map_peers(const toml_datum_t& top, Settings& out) noexcept {
     return ESP_OK;
 }
 
-/** @brief 仅采用有效 MTU；不支持的 flags 无论取值类型如何都只忽略。 */
-void map_flags(const toml_datum_t& top, Settings& out) noexcept {
+/**
+ * @brief 提取 `flags` 表里组件支持的字段。
+ * @details 只解析 `mtu`（576..1380 整数）与 `enable_encryption`（布尔，含上游别名
+ *          `enableEncryption`）；两者若给出但类型/取值不对即报错。表内其它标志
+ *          （`disable_p2p`、`encryption_algorithm`、`data_compress_algo` 等）不解析、不报错。
+ */
+esp_err_t map_flags(const toml_datum_t& top, Settings& out) noexcept {
     const toml_datum_t flags = et_toml_get(top, "flags");
-    if (flags.type == TOML_UNKNOWN) return;
+    if (flags.type == TOML_UNKNOWN) return ESP_OK;
     if (flags.type != TOML_TABLE) {
-        log_ignored({}, "flags", flags);
-        return;
+        ET_LOGE(kTag, "config field 'flags' must be a table");
+        return ESP_ERR_INVALID_ARG;
     }
     for (int32_t i = 0; i < flags.u.tab.size; ++i) {
         const auto name = table_key(flags, i);
         const toml_datum_t datum = flags.u.tab.value[i];
-        if (name == "mtu" && datum.type == TOML_INT64 &&
-            datum.u.int64 >= kMinMtu && datum.u.int64 <= kDefaultMtu) {
+        if (name == "mtu") {
+            if (datum.type != TOML_INT64 || datum.u.int64 < kMinMtu ||
+                datum.u.int64 > kDefaultMtu) {
+                ET_LOGE(kTag, "config field 'flags.mtu' must be an integer in [%u,%u]",
+                        static_cast<unsigned>(kMinMtu), static_cast<unsigned>(kDefaultMtu));
+                return ESP_ERR_INVALID_ARG;
+            }
             out.mtu = static_cast<uint16_t>(datum.u.int64);
             continue;
         }
         // enable_encryption 采用实际取值（缺省 true）；enableEncryption 是上游接受的别名。
-        if ((name == "enable_encryption" || name == "enableEncryption") &&
-            datum.type == TOML_BOOLEAN) {
+        if (name == "enable_encryption" || name == "enableEncryption") {
+            if (datum.type != TOML_BOOLEAN) {
+                ET_LOGE(kTag, "config field 'flags.%.*s' must be a boolean",
+                        static_cast<int>(name.size()), name.data());
+                return ESP_ERR_INVALID_ARG;
+            }
             out.enable_encryption = datum.u.boolean;
             continue;
         }
-        // 与固定运行配置相同的声明无需警告；其余值（包括错误类型）均忽略。
-        if (name == "disable_p2p" && datum.type == TOML_BOOLEAN && datum.u.boolean) continue;
-        if (name == "encryption_algorithm" && datum.type == TOML_STRING &&
-            datum_sv(datum) == "aes-gcm") continue;
-        if (name == "data_compress_algo" && datum.type == TOML_STRING &&
-            datum_sv(datum) == "None") continue;
-        log_ignored("flags.", name, datum);
+        // 其余标志（上游字段或未知键）不解析、不报错。
     }
+    return ESP_OK;
 }
 
-/** @brief 按上游 DhcpConfig 语义提取布尔或 IPv4 CIDR；无法采用时保留默认 false。 */
-void map_dhcp(const toml_datum_t& top, Settings& out) noexcept {
+/**
+ * @brief 按上游 `DhcpConfig` 语义提取布尔或 IPv4 CIDR 字符串。
+ * @details 给出但类型不是布尔/字符串，或 CIDR 非法、前缀不在 0..30，均视为错误。
+ */
+esp_err_t map_dhcp(const toml_datum_t& top, Settings& out) noexcept {
     const toml_datum_t datum = et_toml_get(top, "dhcp");
-    if (datum.type == TOML_UNKNOWN) return;
+    if (datum.type == TOML_UNKNOWN) return ESP_OK;
     if (datum.type == TOML_BOOLEAN) {
         out.dhcp = datum.u.boolean;
-        return;
+        return ESP_OK;
     }
     if (datum.type == TOML_STRING) {
         uint32_t subnet = 0;
         uint8_t prefix = 0;
         bool had_prefix = false;
-        if (parse_ipv4_cidr(datum_sv(datum), subnet, prefix, had_prefix) && had_prefix &&
-            prefix <= 30) {
-            out.dhcp = true;
-            out.dhcp_has_subnet = true;
-            out.dhcp_subnet = ipv4_network_of(subnet, prefix);
-            out.dhcp_prefix = prefix;
-            return;
+        if (!parse_ipv4_cidr(datum_sv(datum), subnet, prefix, had_prefix) || !had_prefix) {
+            ET_LOGE(kTag, "config field 'dhcp' must be a boolean or an IPv4 CIDR string");
+            return ESP_ERR_INVALID_ARG;
         }
+        if (prefix > 30) {
+            ET_LOGE(kTag, "config field 'dhcp' prefix must be in [0,30]");
+            return ESP_ERR_INVALID_ARG;
+        }
+        out.dhcp = true;
+        out.dhcp_has_subnet = true;
+        out.dhcp_subnet = ipv4_network_of(subnet, prefix);
+        out.dhcp_prefix = prefix;
+        return ESP_OK;
     }
-    log_ignored({}, "dhcp", datum);
+    ET_LOGE(kTag, "config field 'dhcp' must be a boolean or an IPv4 CIDR string");
+    return ESP_ERR_INVALID_ARG;
 }
 
 }  // namespace
@@ -425,67 +438,68 @@ esp_err_t parse_toml_into(Settings& out, std::string_view text) noexcept {
 
     const toml_datum_t top = result.toptab;
 
-    if (err == ESP_OK) {
-        for (int32_t i = 0; i < top.u.tab.size && err == ESP_OK; ++i) {
-            const std::string_view key = table_key(top, i);
-            if (is_known_root_key(key)) {
-                continue;
-            }
-            log_ignored({}, key, top.u.tab.value[i]);
-        }
-    }
+    // 根级未知键（以及组件不支持的上游字段，如 listeners/routes/proxy_network 等）
+    // 一律不解析、不报错——与上游 serde 忽略未知字段的行为一致。
 
     if (err == ESP_OK) {
-        auto value = optional_string(top, "instance_name");
-        if (!value.empty()) {
+        std::string_view value{};
+        err = read_optional_string(top, "instance_name", value);
+        if (err == ESP_OK && !value.empty()) {
             out.instance_name = value;
             // 显式给出的实例名优先于"取 hostname"的默认推导。
             out.instance_name_explicit = true;
         }
-        value = optional_string(top, "hostname");
-        if (!value.empty()) {
+        value = {};
+        if (err == ESP_OK) err = read_optional_string(top, "hostname", value);
+        if (err == ESP_OK && !value.empty()) {
             normalize_hostname(value, out.hostname);
+            // 与上游一致：规范化后为空（例如全是控制字符）视为"未提供"，回退缺省 Espressif。
             if (out.hostname.empty()) {
-                ET_LOGW(kTag, "ignored config: hostname (empty after normalization)");
+                ET_LOGD(kTag, "config field 'hostname' has no usable characters; using default");
             }
         }
-        value = optional_string(top, "instance_id");
-        if (!value.empty()) {
+        value = {};
+        if (err == ESP_OK) err = read_optional_string(top, "instance_id", value);
+        if (err == ESP_OK && !value.empty()) {
             // 解析失败可能已经写入部分字节；只有完整有效时才提交。
             std::array<uint8_t, 16> parsed{};
-            if (parse_uuid_text(value, parsed)) {
+            if (!parse_uuid_text(value, parsed)) {
+                ET_LOGE(kTag, "config field 'instance_id' must be a UUID string");
+                err = ESP_ERR_INVALID_ARG;
+            } else {
                 out.instance_id = parsed;
                 out.has_instance_id = true;
-            } else {
-                ET_LOGW(kTag, "ignored config: instance_id (not a valid UUID)");
             }
         }
-        value = optional_string(top, "ipv4");
-        if (!value.empty()) {
+        value = {};
+        if (err == ESP_OK) err = read_optional_string(top, "ipv4", value);
+        if (err == ESP_OK && !value.empty()) {
             uint32_t addr = 0;
             uint8_t prefix = 24;
             bool had_prefix = false;
-            if (!parse_ipv4_cidr(value, addr, prefix, had_prefix)) {
-                ET_LOGW(kTag, "ignored config: ipv4 (not a valid IPv4/CIDR)");
-            } else {
+            if (parse_ipv4_cidr(value, addr, prefix, had_prefix)) {
                 out.has_static_ipv4 = true;
                 out.static_ipv4 = addr;
+                // 与上游一致：裸地址或 /32 归一化为 /24。
                 out.static_prefix = (had_prefix && prefix != 32) ? prefix : 24;
-                if (had_prefix && prefix == 32) {
-                    ET_LOGW(kTag, "ignored config: ipv4.prefix (/32 normalized to /24)");
-                }
             }
+            // 与上游 `get_ipv4()` 的 `.parse().ok()` 一致：字符串类型对但内容无法解析时
+            // **静默忽略**（不报错、不设置静态地址）。
         }
         if (err == ESP_OK) {
             err = map_network_identity(top, out);
         }
         if (err == ESP_OK) {
-            map_flags(top, out);
-            map_dhcp(top, out);
+            err = map_flags(top, out);
+        }
+        if (err == ESP_OK) {
+            err = map_dhcp(top, out);
+        }
+        if (err == ESP_OK) {
             err = map_peers(top, out);
         }
         if (out.has_static_ipv4 && out.dhcp) {
-            ET_LOGW(kTag, "ignored config: dhcp (ipv4 is configured, static address wins)");
+            // 静态地址优先：上游同样是配置了 ipv4 就忽略 dhcp。
             out.dhcp = false;
             out.dhcp_has_subnet = false;
         }

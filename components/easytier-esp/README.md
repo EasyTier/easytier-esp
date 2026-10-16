@@ -18,8 +18,8 @@
 
 已实现（有宿主测试与 ESP-IDF 构建证据）：
 
-- 与上游核心相同格式的 TOML 配置（`et::Inst` 构造函数直接接受 TOML 文本，应用自行读文件），
-  不兼容参数忽略并报告；
+- 与上游核心相同格式的 TOML 配置（`et::Inst` 构造函数直接接受 TOML 文本，应用自行读文件）：
+  支持的字段必须写对，不支持的字段不解析也不报错（对齐上游 serde 行为）；
 - SipHash-1-3 密钥派生、AES-128-GCM（PSA Crypto）、PeerManagerHeader/分帧等线格式；
 - 有界 protobuf 编解码（含未知字段跳过、packed repeated、负整数、optional 存在性）；
 - 非阻塞 TCP 传输：非阻塞连接、按帧重组（拆包/粘包）、部分写游标与背压、代际隔离；
@@ -86,33 +86,37 @@ data_compress_algo = "None"
 disable_p2p = true
 ```
 
-字段处理分三类：
+字段策略与上游 `easytier-core/src/config/toml.rs` 一致：**支持的字段必须写对，不支持的
+字段根本不解析也不报错**。
 
-1. **支持并应用**：`instance_name`、`hostname`、`instance_id`、`ipv4`、`dhcp`、
-   `network_identity.network_name/network_secret`、`[[peer]].uri`（`tcp://`，**条目数量无上限**）、
-   `flags.mtu`（576..1380）、`flags.enable_encryption`（布尔，缺省 `true`，别名
-   `enableEncryption`）。
-2. **忽略并报告**：`listeners`、`routes`、`proxy_network`、`port_forward`、`exit_nodes`、
-   `secure_mode`、`acl`、`vpn_portal_config`、`ipv6`、STUN/日志相关字段，以及
-   非 `aes-gcm` 算法、非 `None` 压缩、`disable_p2p=false`、
-   其他非 peer 的不兼容取值。peer 的错误或不支持取值按第 4 项报错。
-3. **非 peer 字段无法采用也忽略**：类型错误、无效 IPv4/UUID/DHCP/MTU、超过字段
-   存储容量的值均跳过，保留默认值，其余有效字段继续提取。
-4. **peer 只能写对**：非数组/非表、缺少 uri、uri 类型错误、无效主机或端口、
-   非 TCP 协议、IPv6 均报错；不能通过另一个有效 peer 掩盖错误。
-   peer 表内额外的无关字段仍忽略。入口 URI 校验只有这一份实现。
+1. **支持的字段（必须正确填写）**：`instance_name`、`hostname`、`instance_id`、`ipv4`、
+   `dhcp`、`network_identity.network_name/network_secret`、`[[peer]].uri`（`tcp://`，
+   **条目数量无上限**）、`flags.mtu`（576..1380）、`flags.enable_encryption`（布尔，
+   缺省 `true`，别名 `enableEncryption`）。字段存在但类型错误或取值非法（UUID/CIDR/
+   MTU 越界/URI 非法等）→ **构造失败**（Error 日志 + `last_error`）。
+   唯一例外是 `ipv4`：字符串类型正确但内容无法解析时，与上游 `get_ipv4().parse().ok()`
+   一样**静默忽略**（视为未配置静态地址）。
+2. **不支持的字段（不解析、不报错）**：未知键，以及上游有但本组件未实现的字段——
+   `listeners`、`mapped_listeners`、`routes`、`proxy_network`、`port_forward`、`exit_nodes`、
+   `secure_mode`、`acl`、`vpn_portal_config`、`ipv6*`、`netns`、STUN/日志相关字段、
+   `flags` 里的其它标志（`disable_p2p`、`encryption_algorithm`、`data_compress_algo`……）、
+   `peer` 表里的其它键（如 `peer_public_key`）。它们**既不解析也不校验**，写错也不会报错。
+3. **缺失的字段**保留组件缺省值（`network_name` 缺省 `default`、`instance_id` 随机生成、
+   `hostname` 回退 `Espressif` 等）。
+4. **peer 只能写对**：非数组/非表、缺少 uri、uri 类型错误、无效主机或端口、非 TCP 协议、
+   IPv6 均报错；不能通过另一个有效 peer 掩盖错误。入口 URI 校验只有这一份实现。
 
-入口**数量**不设上限（只受 TOML 解析内存预算约束）；**同时连接**的数量由
-Kconfig 的 `EASYTIER_ESP_MAX_CONNECTED_PEERS` 决定（默认 6），其余入口作为轮换备用。
+入口**数量**不设上限；**同时连接**的数量由 Kconfig 的 `EASYTIER_ESP_MAX_CONNECTED_PEERS`
+决定（默认 6），其余入口作为轮换备用。
 
 文本字段（实例名 / 主机名 / 网络名 / 网络密钥 / 入口主机）同样**没有固定长度上限**：
-它们用 `std::string` 按实际长度在堆上分配（短字段走 SSO）；TOML 文本本身也没有长度上限，
-只受解析内存预算约束。唯一保留的上游规则是 hostname 规范化后最多 32 个 Unicode 码点。
+它们用 `std::string` 按实际长度在堆上分配（短字段走 SSO）；TOML 文本本身也没有长度上限。
+唯一保留的上游规则是 hostname 规范化后最多 32 个 Unicode 码点。
 
 注意 `inst.get_config_info()` 返回的**诊断快照**仍是定长缓冲（实例名/主机名/网络名
 各 64 字节、入口文本 200 字节），超长取值在快照里会被截断——它只用于日志，不影响生效配置。
 
-TOML 语法错误、peer 配置错误或解析嵌套/语法树超限会让 **`et::Inst` 构造失败**
+TOML 语法错误、支持字段取值非法、解析嵌套/语法树超限都会让 **`et::Inst` 构造失败**
 （`valid()==false`，错误码见 `inst.last_error()`）。失败原因由组件以 **Error 级日志**
 直接输出（含出错行号或字段路径），**不做缓存**。
 空文档、无关字段、缺少入口或虚拟地址都可以解析；解析成功不代表组网成功——入口与虚拟地址的
@@ -120,13 +124,10 @@ TOML 语法错误、peer 配置错误或解析嵌套/语法树超限会让 **`et
 （不能跨任务并发构造）；并发解析会被直接拒绝并返回 `ESP_ERR_INVALID_STATE`。
 
 字段名、层级、默认网络身份、IPv4 /32→/24、DHCP 布尔/CIDR 形式参考上游
-`easytier-core/src/config/toml.rs`。ESP 端按需求对字段转换采用更宽容的策略，
-不会套用上游所有结构体的强类型反序列化约束。
+`easytier-core/src/config/toml.rs`。
 
-无法采用的**非 peer 字段**（未知键、类型错误、取值非法）以 **Warn 级日志**列出字段路径后
-忽略，只记录路径、不含任何密钥取值。
-
-`dhcp` 接受布尔或 IPv4 CIDR 字符串（前缀 0..=30）；配置了静态 `ipv4` 时 `dhcp` 被忽略。
+`dhcp` 接受布尔或 IPv4 CIDR 字符串（前缀 0..=30，越界或格式错误即报错）；配置了静态
+`ipv4` 时 `dhcp` 被忽略（与上游"静态地址优先"一致）。
 
 ## 支持字段的缺省值
 
@@ -138,9 +139,9 @@ TOML 语法错误、peer 配置错误或解析嵌套/语法树超限会让 **`et
 | `instance_name` | 取 `hostname`（按用户要求：未显式配置时优先用 hostname） | 显式配置的 `instance_name` 优先 |
 | `instance_id` | 构造 `et::Inst` 时生成并缓存随机 UUID v4 | 上游 `toml.rs::get_id()`；显式 UUID（含 nil UUID）保持原值 |
 | `hostname` | `Espressif` | 构造 `et::Inst` 时即补齐；上游优先使用非空配置 hostname，否则取 Host fallback，ESP fallback 按用户要求设为此值 |
-| `network_identity.network_name` | `default` | 上游 `NetworkIdentity::default()` |
-| `network_identity.network_secret` | 空字符串 | 上游普通模式身份归一化；不是随机密钥 |
-| `ipv4` | 不设置静态地址 | 上游 `get_ipv4()` 缺省 `None`；裸地址或 /32 归一化为 /24 |
+| `network_identity.network_name` | `default`（未写 `[network_identity]` 表时） | 上游 `NetworkIdentity::default()`；**一旦出现该表就是必填字段**（与上游 serde 一致），缺失/空串/非字符串都报错 |
+| `network_identity.network_secret` | 空字符串 | 上游普通模式身份归一化；不是随机密钥。表出现时可选 |
+| `ipv4` | 不设置静态地址 | 上游 `get_ipv4()` 缺省 `None`；裸地址或 /32 归一化为 /24；**字符串无法解析时静默忽略**（与上游 `.parse().ok()` 一致） |
 | `dhcp` | `false` | 上游 `DhcpConfig::default()` |
 | DHCP 自举网段 | 启用 DHCP 且未学到可用网段时回落 `10.126.126.0/24` | 上游 `DhcpIpv4Service`；可能先采用同网络其他节点宣告的网段 |
 | `peer` | 空列表 | 上游 `get_peers()` 缺省空列表；指定的入口必须校验通过 |
@@ -197,7 +198,7 @@ void start_easytier() {
     et::RuntimeOptions options{};
     options.on_event = &on_easytier_event;
     // 构造即初始化（TOML 解析 + 校验 + 分配）。组件禁用异常：失败通过 valid()/last_error()
-    // 查询；解析失败原因与忽略项已由组件直接写入日志（Error / Warn）。
+    // 查询；失败原因已由组件直接写入 Error 日志。
     inst.emplace(std::string_view(reinterpret_cast<const char*>(easytier_toml_start), len),
                  options);
     if (!inst->valid()) { /* 看 inst->last_error() */ inst.reset(); return; }
