@@ -440,11 +440,6 @@ esp_err_t parse_toml_into(Settings& out, ConfigReport& report, std::string_view 
     // 文档内部 NUL 仍交给语法解析器拒绝，绝不按 strlen 截断隐藏后续内容。
     if (!text.empty() && text.back() == '\0') text.remove_suffix(1);
     if (text.empty()) return ESP_OK;  // 上游空文档使用默认配置
-    if (text.size() > kTomlMaxBytes) {
-        ET_LOGE(kTag, "config too large: %u bytes", static_cast<unsigned>(text.size()));
-        add_diag(report, ConfigIssue::ResourceLimit, "toml");
-        return ESP_ERR_NO_MEM;
-    }
     if (!toml_scan_limits(text)) {
         add_diag(report, ConfigIssue::ResourceLimit, "toml");
         return ESP_ERR_NO_MEM;

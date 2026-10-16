@@ -16,13 +16,6 @@
 
 namespace et {
 
-/** @brief TOML 文本/文件最大字节数。 */
-#if defined(CONFIG_EASYTIER_ESP_TOML_MAX_BYTES)
-inline constexpr size_t kTomlMaxBytes = CONFIG_EASYTIER_ESP_TOML_MAX_BYTES;
-#else
-inline constexpr size_t kTomlMaxBytes = 16 * 1024;
-#endif
-
 /** @brief 单次 TOML 解析允许累计申请的堆字节上限（硬上限，不是估算值）。 */
 #if defined(CONFIG_EASYTIER_ESP_TOML_HEAP_BUDGET)
 inline constexpr size_t kTomlHeapBudget = CONFIG_EASYTIER_ESP_TOML_HEAP_BUDGET;
@@ -107,8 +100,6 @@ inline constexpr size_t kTomlMaxTableKeys = 256;
 // 代码真正能处理的区间再钉一遍：越界会让固件**编译失败**，而不是在运行期以越界/溢出
 // 的形式暴露。
 // ---------------------------------------------------------------------------
-static_assert(kTomlMaxBytes >= 1024, "TOML 上限过小：至少 1 KiB");
-static_assert(kTomlMaxBytes <= 65536, "TOML 上限过大：与静态缓冲/栈预算不符");
 static_assert(kTomlHeapBudget >= 16 * 1024, "TOML 堆预算过小");
 static_assert(kTomlHeapBudget <= 1024 * 1024, "TOML 堆预算过大");
 static_assert(kRpcMaxTransactions >= 1 && kRpcMaxTransactions <= 16,

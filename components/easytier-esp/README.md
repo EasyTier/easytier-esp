@@ -102,12 +102,12 @@ disable_p2p = true
    非 TCP 协议、IPv6 均报错；不能通过另一个有效 peer 掩盖错误。
    peer 表内额外的无关字段仍忽略。入口 URI 校验只有这一份实现。
 
-入口**数量**不设上限（只受 TOML 文本长度与解析预算约束）；**同时连接**的数量由
+入口**数量**不设上限（只受 TOML 解析内存预算约束）；**同时连接**的数量由
 Kconfig 的 `EASYTIER_ESP_MAX_CONNECTED_PEERS` 决定（默认 6），其余入口作为轮换备用。
 
 文本字段（实例名 / 主机名 / 网络名 / 网络密钥 / 入口主机）同样**没有固定长度上限**：
-它们用 `std::string` 按实际长度在堆上分配（短字段走 SSO），约束只有 TOML 文本长度与解析预算。
-唯一保留的上游规则是 hostname 规范化后最多 32 个 Unicode 码点。
+它们用 `std::string` 按实际长度在堆上分配（短字段走 SSO）；TOML 文本本身也没有长度上限，
+只受解析内存预算约束。唯一保留的上游规则是 hostname 规范化后最多 32 个 Unicode 码点。
 
 注意 `inst.get_config_info()` 返回的**诊断快照**仍是定长缓冲（实例名/主机名/网络名
 各 64 字节、入口文本 200 字节），超长取值在快照里会被截断——它只用于日志，不影响生效配置。
@@ -240,12 +240,15 @@ void start_easytier() {
 ## 资源上限
 
 编译期上限通过 Kconfig 配置（`CONFIG_EASYTIER_ESP_*`）：**同时连接**的入口数、组件日志
-等级、并发 RPC 事务、分片重组槽、TOML 文本长度与解析内存预算。容量不足时返回明确错误码
-并在诊断中体现，不会静默截断。
+等级、并发 RPC 事务、分片重组槽、各队列深度与 TOML 解析内存预算。容量不足时返回明确
+错误码并在诊断中体现，不会静默截断。
 
-入口地址**条目数不受这些上限约束**：列表按实际条数在堆上分配，能写多少只取决于 TOML
-文本长度（`EASYTIER_ESP_TOML_MAX_BYTES`）与解析预算（`EASYTIER_ESP_TOML_HEAP_BUDGET`）。
-`EASYTIER_ESP_MAX_CONNECTED_PEERS` 只决定同一时刻建立多少条连接。
+**TOML 文本本身没有长度上限**：组件直接解析应用传入的文本（文本由应用以
+`std::string`/`std::string_view` 持有），不复制、不按固定容量截断。真正受限的是解析器
+的内存预算（`EASYTIER_ESP_TOML_HEAP_BUDGET`）与语法树规模（节点数/数组元素数/表键数、
+嵌套深度、dotted key 分段数），用于拒绝异常放大的文档。入口地址**条目数不受这些上限
+约束**：列表按实际条数在堆上分配。`EASYTIER_ESP_MAX_CONNECTED_PEERS` 只决定同一时刻
+建立多少条连接。
 
 ## 线程与回调约束
 
@@ -273,7 +276,6 @@ void start_easytier() {
 | --- | --- | --- |
 | `EASYTIER_ESP_LOG_LEVEL` | Info | 组件日志编译等级：Closed、Error、Warning、Info、Debug；低于所选等级的调用会在编译期裁剪，Closed 裁剪全部日志 |
 | `EASYTIER_ESP_MAX_CONNECTED_PEERS` | 6 | **同时连接**的入口节点数上限（1..8）。配置里的入口条目数不受此限制，多出的作为轮换备用；每槽约 12 KiB 收发缓冲 |
-| `EASYTIER_ESP_TOML_MAX_BYTES` | 16384 | TOML 文本/文件上限 |
 | `EASYTIER_ESP_TOML_HEAP_BUDGET` | 262144 | 单次 TOML 解析允许累计申请的堆字节上限 |
 | `EASYTIER_ESP_RPC_MAX_TRANSACTIONS` | 4 | 并发 RPC 事务上限 |
 | `EASYTIER_ESP_RPC_REASSEMBLY_SLOTS` | 2 | RPC 分片重组槽数量（每槽约 16 KiB） |
