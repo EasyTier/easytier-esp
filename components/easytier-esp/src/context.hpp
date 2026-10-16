@@ -210,11 +210,11 @@ struct Context {
 };
 
 #if defined(ESP_PLATFORM)
-/** @brief I/O 任务入口（C++ 实现见 io_task.cpp）。 */
+/** @brief I/O 任务入口（C++ 实现见 tasks/io_task.cpp）。 */
 void io_task(void* arg) noexcept;
-/** @brief 控制面任务入口（C++ 实现见 proto_task.cpp）。 */
+/** @brief 控制面任务入口（C++ 实现见 tasks/proto_task.cpp）。 */
 void proto_task(void* arg) noexcept;
-/** @brief 数据面任务入口（C++ 实现见 data_task.cpp）。 */
+/** @brief 数据面任务入口（C++ 实现见 tasks/data_task.cpp）。 */
 void data_task(void* arg) noexcept;
 
 /** @brief FreeRTOS 任务入口包装（xTaskCreate 需要 C 函数指针）。 */

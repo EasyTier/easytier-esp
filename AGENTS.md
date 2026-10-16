@@ -12,10 +12,10 @@
 本项目把 ESP32 接入既有 EasyTier 网络，组件只适配 **ESP-IDF 6.1.x**，当前目标为 ESP32-S3。C++20，命名空间 `et`。**公开 API 只有一个类 `et::Inst`**（RAII）：构造函数直接接收 TOML 文本，内部完成解析、身份补齐、结构校验与资源分配（上下文、队列、任务、socket、虚拟网卡），析构自动停止并释放。**没有独立的配置类**：全部设置项是实例的私有实现（`src/config/settings.hpp` 的内部 `Settings`，用 `std::string`/`std::vector`），构造后不可修改，只能通过 `report()`/`get_config_info()` 读诊断快照。**允许多个 `et::Inst` 并存**，组件内部不得引入文件级实例状态；**不要引入 C 包装层或 `Node` 层**。配置**只走 TOML**：不要加编程式 setter；每次构造都是“缺省值 + TOML”的全量替换，因此未显式给出的 `instance_id`/`hostname`/`instance_name` 每次都会重新生成。组件禁用异常与 RTTI，构造不能返回错误码，失败用 `valid()`/`last_error()`/`report()` 查询；设置文本用 `std::string`，分配失败会终止进程（不再有字段级 `ESP_ERR_NO_MEM`）。
 
 - `components/easytier-esp/include/easytier-esp.h`：公开 C++ API、配置、状态、事件和诊断。
-- `components/easytier-esp/src/`：组件实现；`config/`、`crypto/`、`protocol/`、`transport/`、`peer/`、`rpc/`、`route/`、`netif/`、`data/` 为主要模块。
+- `components/easytier-esp/src/`：组件实现；`config/`、`crypto/`、`protocol/`、`transport/`、`peer/`、`rpc/`、`route/`、`netif/`、`data/`、`tasks/` 为主要模块。
 - `inst.cpp` / `context.hpp`：实例生命周期与运行资源、队列、共享原子状态（每个 `et::Inst` 以私有 `Context*` 成员独占一份上下文与 `started_` 运行标记）。
-- `io_task.cpp`：socket 的唯一所有者；并发连接槽数量由 Kconfig `EASYTIER_ESP_MAX_CONNECTED_PEERS`（默认 6）决定，**入口条目数不设上限**，其余入口轮换备用。不能把一个入口重复连接到两个槽，重试不得阻塞已有连接的收发。
-- `proto_task.cpp`：握手、保活、RPC、路由同步和路由快照发布；`data_task.cpp`：虚拟网卡数据、加解密与中继转发。
+- `tasks/io_task.cpp`：socket 的唯一所有者；并发连接槽数量由 Kconfig `EASYTIER_ESP_MAX_CONNECTED_PEERS`（默认 6）决定，**入口条目数不设上限**，其余入口轮换备用。不能把一个入口重复连接到两个槽，重试不得阻塞已有连接的收发。
+- `tasks/proto_task.cpp`：握手、保活、RPC、路由同步和路由快照发布；`tasks/data_task.cpp`：虚拟网卡数据、加解密与中继转发。
 - `main/`：应用示例，仅负责 NVS、事件循环、WiFi、加载 TOML 和 underlay 通知，不放协议实现。
 - 当前工作区没有 `tests/` 或 `test_apps/`；旧文档中的测试记录不能作为当前可执行入口，不要自行恢复用户移除的目录。
 - `docs/`：只保留 `遗留问题清单.md`（一次全项目精简 Review 查出的**未修**问题与待办，含位置/证据/改法/风险）；组件 README 为使用入口。原「硬件联调指南」「验收证据清单」已按用户要求删除，可从提交 `4ecd063` 取回。
