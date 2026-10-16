@@ -1,6 +1,6 @@
 /**
  * @file context.hpp
- * @brief 组件内部运行上下文（每个 et::Inst 对象经 Inst::Impl 独占一份）。
+ * @brief 组件内部运行上下文（每个 et::Inst 对象独占一份）。
  *
  * @details 设计要点：
  * - **单一所有者**：socket 只属于 I/O 任务，加解密上下文分属控制面与数据面，
@@ -97,7 +97,7 @@ struct SmallMessage {
 /**
  * @brief 组件运行上下文。
  *
- * @note 由某个 et::Inst 对象经 @c Inst::Impl 持有；生命周期覆盖该实例的所有任务，
+ * @note 由某个 et::Inst 对象以私有裸指针成员直接持有；生命周期覆盖该实例的所有任务，
  *       任务退出确认后才释放。多个实例各自持有一份，互不共享。
  */
 struct Context {

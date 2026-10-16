@@ -289,7 +289,7 @@ void start_easytier() {
 | 项目 | 大小 | 说明 |
 | --- | --- | --- |
 | `Context`（堆） | 92,800 B | RPC 重组 33,184（2 槽 × 16 KiB）+ `SyncEngine` 35,240（拓扑 22,928 + 邻接表 8,968 + 快照 524 + 编码缓冲）+ RPC 收发缓冲约 14,000 + `Settings` 外壳 + 其它 |
-| `Inst` 对象本体 | 4,496 B | 私有 `Impl*` + `ConfigReport`（约 4.5 KiB 解析诊断）；设置项在堆上的 `Impl` 内 |
+| `Inst` 对象本体 | 约 4.5 KiB | 私有 `Context*` + `bool started_` + `ConfigReport`（约 4.5 KiB 解析诊断）；设置项与运行状态在堆上的 `Context` 内 |
 | `Settings` 文本字段（堆） | 按实际长度 | 实例名 / 主机名 / 网络名 / 网络密钥都是 `std::string`（短字段走 SSO），**长度无固定上限** |
 | 入口地址列表（堆） | 每条约 32 B + 主机文本 | `std::vector<PeerEndpoint>`，按配置实际条数分配；条目数量无上限 |
 | 帧队列 | 约 24 KiB | 控制面 / 数据面 / 发送队列各 4 × 2008 B |

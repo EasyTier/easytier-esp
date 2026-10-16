@@ -214,6 +214,13 @@ struct RuntimeOptions {
 // ---------------------------------------------------------------------------
 
 /**
+ * @brief 实例的运行上下文（组件内部类型，定义在 @c src/context.hpp ）。
+ * @note 这里只做前向声明：@ref Inst 以裸指针持有它，因此公开头不需要暴露
+ *       FreeRTOS/lwIP/内部模块头，也不受上下文大小（约 91 KiB）影响。
+ */
+struct Context;
+
+/**
  * @brief 一个 EasyTier 运行实例（RAII，也是本组件唯一的公开类）。
  *
  * @details
@@ -300,7 +307,7 @@ public:
 
     /** @brief 构造是否成功（等价于 @ref last_error 为 @c ESP_OK ）。 */
     [[nodiscard]] bool valid() const noexcept {
-        return impl_ != nullptr && last_error_ == ESP_OK;
+        return ctx_ != nullptr && last_error_ == ESP_OK;
     }
     /** @brief 构造阶段的错误码；构造成功后的运行期错误见 @ref Status::last_error 。 */
     [[nodiscard]] esp_err_t last_error() const noexcept { return last_error_; }
@@ -353,10 +360,8 @@ public:
     esp_err_t stop(uint32_t timeout_ms = 5000) noexcept;
 
 private:
-    /** @brief 私有实现：运行上下文（含全部设置项）+ 运行标记（定义在 inst.cpp）。 */
-    struct Impl;
-
-    Impl* impl_ = nullptr;      ///< 堆上的上下文（92,800 B ≈ 91 KiB，建议启用 PSRAM）
+    Context* ctx_ = nullptr;    ///< 堆上的运行上下文（92,800 B ≈ 91 KiB，建议启用 PSRAM）
+    bool started_ = false;      ///< 是否已 @ref start
     ConfigReport report_{};     ///< 最近一次 TOML 解析诊断（约 4.5 KiB）
     esp_err_t last_error_ = ESP_ERR_INVALID_STATE;  ///< 构造阶段错误码
 };

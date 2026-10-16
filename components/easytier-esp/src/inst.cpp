@@ -272,12 +272,6 @@ void destroy_queues(Context& ctx) noexcept { (void)ctx; }
 
 }  // namespace
 
-/** @brief 私有实现：每个实例独立持有的上下文与运行标记。 */
-struct Inst::Impl {
-    Context ctx{};         ///< 运行上下文（堆分配，92,800 B ≈ 91 KiB）
-    bool started = false;  ///< 是否已 start()
-};
-
 /**
  * @brief 构造实例：解析 TOML → 补齐身份 → 校验结构 → 堆上分配上下文并派生密钥。
  * @note 组件禁用异常，构造不能返回错误码；失败时对象 valid()==false，
@@ -299,18 +293,18 @@ Inst::Inst(std::string_view toml, const RuntimeOptions& options) noexcept {
     if (last_error_ != ESP_OK) {
         return;
     }
-    // Impl 内含 Context（92,800 B ≈ 91 KiB：RPC 重组缓冲、拓扑、邻接表、快照等）。
+    // 运行上下文 92,800 B ≈ 91 KiB：RPC 重组缓冲、拓扑、邻接表、快照等。
     // 未启用 PSRAM 时可能分配失败，这里给出明确提示。
-    Impl* impl = new (std::nothrow) Impl();
-    if (impl == nullptr) {
+    ctx_ = new (std::nothrow) Context();
+    if (ctx_ == nullptr) {
         ET_LOGE(kTag, "context allocation failed (%u bytes); enable PSRAM or shrink buffers",
-                static_cast<unsigned>(sizeof(Impl)));
+                static_cast<unsigned>(sizeof(Context)));
         last_error_ = ESP_ERR_NO_MEM;
         return;
     }
-    prepare_context(impl->ctx, settings, options);
-    impl->ctx.state.store(State::Stopped);
-    impl_ = impl;
+    prepare_context(*ctx_, settings, options);
+    ctx_->state.store(State::Stopped);
+    started_ = false;
     last_error_ = ESP_OK;
 }
 
@@ -320,39 +314,40 @@ Inst::Inst(std::string_view toml, const RuntimeOptions& options) noexcept {
  *          因此在回调中析构会永久阻塞；请只在普通应用任务中销毁实例。
  */
 Inst::~Inst() noexcept {
-    if (impl_ == nullptr) {
+    if (ctx_ == nullptr) {
         return;
     }
 #if defined(ESP_PLATFORM)
-    if (impl_->started) {
+    if (started_) {
         (void)stop(UINT32_MAX);
     }
 #endif
-    destroy_queues(impl_->ctx);
+    destroy_queues(*ctx_);
     // 清除密钥与网络密钥，避免残留在堆中。
-    impl_->ctx.key.fill(0);
-    impl_->ctx.digest.fill(0);
-    zeroize_string(impl_->ctx.settings.network_secret);
-    delete impl_;
-    impl_ = nullptr;
+    ctx_->key.fill(0);
+    ctx_->digest.fill(0);
+    zeroize_string(ctx_->settings.network_secret);
+    delete ctx_;
+    ctx_ = nullptr;
+    started_ = false;
 }
 
 esp_err_t Inst::start() noexcept {
-    if (impl_ == nullptr) {
+    if (ctx_ == nullptr) {
         return ESP_ERR_INVALID_STATE;
     }
 #if defined(ESP_PLATFORM)
-    if (impl_->started) {
+    if (started_) {
         return ESP_ERR_INVALID_STATE;
     }
-    const esp_err_t err = start_runtime(impl_->ctx);
+    const esp_err_t err = start_runtime(*ctx_);
     if (err != ESP_OK) {
-        destroy_queues(impl_->ctx);
-        impl_->ctx.set_error(err);
-        impl_->ctx.state.store(State::Error);
+        destroy_queues(*ctx_);
+        ctx_->set_error(err);
+        ctx_->state.store(State::Error);
         return err;
     }
-    impl_->started = true;
+    started_ = true;
     // Started 事件由控制面任务在进入主循环时上报，保证回调上下文一致。
     return ESP_OK;
 #else
@@ -361,17 +356,17 @@ esp_err_t Inst::start() noexcept {
 }
 
 esp_err_t Inst::set_underlay_ready(bool ready) noexcept {
-    if (impl_ == nullptr) {
+    if (ctx_ == nullptr) {
         return ESP_ERR_INVALID_STATE;
     }
 #if defined(ESP_PLATFORM)
-    if (!impl_->started) {
+    if (!started_) {
         return ESP_ERR_INVALID_STATE;
     }
     SmallMessage msg{};
     msg.kind = static_cast<uint8_t>(ready ? AppCommand::UnderlayUp : AppCommand::UnderlayDown);
     // 非阻塞：队列满时返回错误，由调用方重试，绝不静默丢弃物理网络状态。
-    if (xQueueSend(impl_->ctx.q_app_cmd, &msg, 0) != pdTRUE) {
+    if (xQueueSend(ctx_->q_app_cmd, &msg, 0) != pdTRUE) {
         return ESP_ERR_NO_MEM;
     }
     return ESP_OK;
@@ -382,10 +377,10 @@ esp_err_t Inst::set_underlay_ready(bool ready) noexcept {
 }
 
 esp_err_t Inst::get_status(Status& out) const noexcept {
-    if (impl_ == nullptr) {
+    if (ctx_ == nullptr) {
         return ESP_ERR_INVALID_STATE;
     }
-    const Context& ctx = impl_->ctx;
+    const Context& ctx = *ctx_;
     out.state = ctx.state.load();
     out.peer_id = ctx.my_peer_id.load();
     out.virtual_ipv4 = ctx.my_ipv4.load();
@@ -403,10 +398,10 @@ esp_err_t Inst::get_status(Status& out) const noexcept {
  *          因此可以据此确认 TOML 的映射结果。
  */
 esp_err_t Inst::get_config_info(ConfigInfo& out) const noexcept {
-    if (impl_ == nullptr) {
+    if (ctx_ == nullptr) {
         return ESP_ERR_INVALID_STATE;
     }
-    const Settings& cfg = impl_->ctx.settings;
+    const Settings& cfg = ctx_->settings;
     out = ConfigInfo{};
     copy_text(out.instance_name, cfg.instance_name);
     copy_text(out.hostname, cfg.hostname);
@@ -440,29 +435,29 @@ esp_err_t Inst::get_config_info(ConfigInfo& out) const noexcept {
 }
 
 esp_err_t Inst::stop(uint32_t timeout_ms) noexcept {
-    if (impl_ == nullptr) {
+    if (ctx_ == nullptr) {
         return ESP_ERR_INVALID_STATE;
     }
 #if defined(ESP_PLATFORM)
-    if (!impl_->started) {
+    if (!started_) {
         return ESP_OK;  // 幂等
     }
-    impl_->ctx.state.store(State::Stopping);
-    impl_->ctx.underlay_ready.store(false);
-    impl_->ctx.stop_requested.store(true);
+    ctx_->state.store(State::Stopping);
+    ctx_->underlay_ready.store(false);
+    ctx_->stop_requested.store(true);
 
-    if (!wait_tasks(impl_->ctx, timeout_ms)) {
+    if (!wait_tasks(*ctx_, timeout_ms)) {
         // 任务尚未退出：保留全部资源，允许再次 stop()。
         return ESP_ERR_TIMEOUT;
     }
-    impl_->started = false;
-    if (impl_->ctx.netif_created) {
-        (void)impl_->ctx.virtual_netif.set_link(false);
+    started_ = false;
+    if (ctx_->netif_created) {
+        (void)ctx_->virtual_netif.set_link(false);
     }
-    impl_->ctx.state.store(State::Stopped);
-    impl_->ctx.io_task_handle = nullptr;
-    impl_->ctx.proto_task_handle = nullptr;
-    impl_->ctx.data_task_handle = nullptr;
+    ctx_->state.store(State::Stopped);
+    ctx_->io_task_handle = nullptr;
+    ctx_->proto_task_handle = nullptr;
+    ctx_->data_task_handle = nullptr;
     return ESP_OK;
 #else
     (void)timeout_ms;
