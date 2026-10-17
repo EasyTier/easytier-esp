@@ -188,15 +188,16 @@ Topology::MergeResult Topology::merge_conn_row(uint32_t peer_id, uint32_t versio
 void Topology::expire(uint32_t now_ms) noexcept {
     for (size_t i = 0; i < peer_count_;) {
         TopoPeer& peer = peers_[i];
-        const uint32_t age = elapsed_ms(now_ms, peer.last_update_ms);
-        if (age > kTopoPeerRemoveMs) {
+        // 时间戳可能比本轮 now 略晚（RPC 回调里重新取了 now_ms()）；expired() 用
+        // 有符号比较，不会把刚合并的条目回绕成"已过期"。
+        if (expired(now_ms, peer.last_update_ms, kTopoPeerRemoveMs)) {
             ET_LOGI(kTag, "removing expired peer %u", static_cast<unsigned>(peer.peer_id));
             peers_[i] = peers_[peer_count_ - 1];
             peers_[--peer_count_] = TopoPeer{};
             dirty_ = true;
             continue;  // 槽位被替换，重新检查同一位置
         }
-        if (peer.in_graph && age > kTopoPeerStaleMs) {
+        if (peer.in_graph && expired(now_ms, peer.last_update_ms, kTopoPeerStaleMs)) {
             ET_LOGW(kTag, "peer %u left the graph (stale)", static_cast<unsigned>(peer.peer_id));
             peer.in_graph = false;
             dirty_ = true;
@@ -205,7 +206,7 @@ void Topology::expire(uint32_t now_ms) noexcept {
     }
     for (size_t i = 0; i < row_count_;) {
         TopoConnRow& row = rows_[i];
-        if (elapsed_ms(now_ms, row.last_update_ms) > kTopoConnStaleMs) {
+        if (expired(now_ms, row.last_update_ms, kTopoConnStaleMs)) {
             rows_[i] = rows_[row_count_ - 1];
             rows_[--row_count_] = TopoConnRow{};
             dirty_ = true;

@@ -28,9 +28,22 @@ namespace et {
 #endif
 }
 
-/** @brief 无符号时间差（正确处理 32 位回绕）。 */
+/**
+ * @brief 无符号时间差（正确处理 32 位回绕）。
+ * @note 仅用于已保证 @p since 不晚于 @p now 的"回绕差值"。判断"记录时间戳是否
+ *       超时"请用 @ref expired —— 同一轮任务循环里时间戳可能比比较基准晚几毫秒。
+ */
 [[nodiscard]] inline uint32_t elapsed_ms(uint32_t now, uint32_t since) noexcept {
     return static_cast<uint32_t>(now - since);
+}
+
+/**
+ * @brief @p since 之后是否已经超过 @p timeout_ms。
+ * @details 用有符号差值：正确处理 32 位回绕；@p since 比 @p now 略晚（例如同一轮
+ *          循环里重新取了 `now_ms()`）时返回 false，不会把刚写入的记录判成过期。
+ */
+[[nodiscard]] inline bool expired(uint32_t now, uint32_t since, uint32_t timeout_ms) noexcept {
+    return static_cast<int32_t>(now - since) > static_cast<int32_t>(timeout_ms);
 }
 
 /**
