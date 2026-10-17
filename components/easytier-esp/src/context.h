@@ -1,5 +1,5 @@
 /**
- * @file context.hpp
+ * @file context.h
  * @brief 组件内部运行上下文（每个 et::Inst 对象独占一份）。
  *
  * @details 设计要点：
@@ -95,13 +95,64 @@ struct SmallMessage {
 #endif
 
 /**
- * @brief 组件运行上下文。
+ * @brief 组件运行上下文（RAII：持有队列/任务/连接/AEAD/虚拟网卡与密钥）。
  *
- * @note 由某个 et::Inst 对象以私有裸指针成员直接持有；生命周期覆盖该实例的所有任务，
- *       任务退出确认后才释放。多个实例各自持有一份，互不共享。
+ * @details 生命周期由 @ref et::Inst 驱动：
+ * @code
+ * Context ctx;                      // 只分配内存，不创建任何资源
+ * ctx.prepare(settings, options);   // 拷贝设置、派生密钥、随机 peer id
+ * ctx.start();                      // 建队列 / AEAD / TcpConn / 任务
+ * ...
+ * ctx.stop(5000);                   // 等任务退出（可超时）
+ * // 析构：若仍在运行则无限等待，再释放资源并清零密钥
+ * @endcode
+ *
+ * 数据成员对同组件的任务公开（任务通过 @c ctx.xxx 直接访问），但生命周期方法只应由
+ * 实例持有者串行调用。多个实例各持一份，互不共享。
  */
-struct Context {
-    Settings settings{};                ///< 校验后的生效设置（构造后不可变）
+class Context final {
+public:
+    Context() noexcept = default;
+    /** @brief 析构：若仍在运行则无限等待停止，然后释放全部资源并清零密钥。 */
+    ~Context() noexcept;
+
+    Context(const Context&) = delete;
+    Context& operator=(const Context&) = delete;
+    Context(Context&&) = delete;
+    Context& operator=(Context&&) = delete;
+
+    /**
+     * @brief 准备上下文：拷贝设置与运行选项、派生密钥/摘要、生成随机 peer id。
+     * @note 不创建任何运行资源；重复调用会覆盖上一次的准备结果（要求尚未 start）。
+     */
+    void prepare(const Settings& new_settings, const RuntimeOptions& new_options) noexcept;
+
+    /**
+     * @brief 启动：创建队列/AEAD/TcpConn/虚拟网卡与三个任务。
+     * @return @c ESP_OK；已启动时返回 @c ESP_ERR_INVALID_STATE，资源不足返回
+     *         @c ESP_ERR_NO_MEM（失败时已回滚并置 @ref state 为 Error）。
+     */
+    esp_err_t start() noexcept;
+
+    /**
+     * @brief 停止（幂等）：置停止标志并等待任务退出。
+     * @param timeout_ms 等待上限；@c UINT32_MAX 表示无限等待（析构路径使用）。
+     * @return @c ESP_OK、@c ESP_ERR_TIMEOUT（资源保留，可重试）或 @c ESP_ERR_INVALID_STATE。
+     */
+    esp_err_t stop(uint32_t timeout_ms) noexcept;
+
+    /** @brief 通知物理网络是否就绪（非阻塞入队；未启动返回 @c ESP_ERR_INVALID_STATE）。 */
+    esp_err_t set_underlay_ready(bool ready) noexcept;
+
+    /** @brief 是否已 @ref start 。 */
+    [[nodiscard]] bool started() const noexcept { return started_; }
+
+    /** @brief 拷贝状态快照。 */
+    void get_status(Status& out) const noexcept;
+    /** @brief 拷贝生效配置快照（不含网络密钥）。 */
+    void get_config_info(ConfigInfo& out) const noexcept;
+
+    Settings settings{};                ///< 校验后的生效设置（准备后不可变）
     RuntimeOptions options{};           ///< 事件回调等运行期选项
     std::array<uint8_t, 16> key{};      ///< 派生的 AES-128 密钥
     std::array<uint8_t, 32> digest{};   ///< 网络密钥摘要
@@ -207,6 +258,19 @@ struct Context {
         event.status.dropped_packets = dropped.load();
         options.on_event(event, options.user_data);
     }
+
+private:
+    /** @brief 创建队列/AEAD/TcpConn/网卡与任务；失败时由调用方回滚。 */
+    esp_err_t create_runtime() noexcept;
+    /** @brief 释放队列/连接/AEAD/网卡（可重复调用；析构与 start 失败回滚共用）。 */
+    void release_runtime() noexcept;
+    /**
+     * @brief 等待三个任务确认退出。
+     * @param timeout_ms 等待上限；@c UINT32_MAX 表示无限等待（析构路径使用）。
+     */
+    bool wait_tasks(uint32_t timeout_ms) noexcept;
+
+    bool started_ = false;  ///< 是否已 start()
 };
 
 #if defined(ESP_PLATFORM)

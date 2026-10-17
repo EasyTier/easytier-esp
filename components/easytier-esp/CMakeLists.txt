@@ -25,6 +25,7 @@ idf_component_register(
         "src/config/toml.cpp"
         "src/tasks/io_task.cpp"
         "src/tasks/proto_task.cpp"
+        "src/context.cpp"
         "src/inst.cpp"
         "third_party/tomlc17/tomlc17.c"
     INCLUDE_DIRS

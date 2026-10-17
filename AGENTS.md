@@ -13,7 +13,7 @@
 
 - `components/easytier-esp/include/easytier-esp.h`：公开 C++ API、配置、状态、事件和诊断。
 - `components/easytier-esp/src/`：组件实现；`config/`、`crypto/`、`protocol/`、`transport/`、`peer/`、`rpc/`、`route/`、`netif/`、`data/`、`tasks/` 为主要模块。
-- `inst.cpp` / `context.hpp`：实例生命周期与运行资源、队列、共享原子状态（每个 `et::Inst` 以私有 `Context*` 成员独占一份上下文与 `started_` 运行标记）。
+- `inst.cpp` / `context.h` / `context.cpp`：`Inst` 只负责 TOML→`Settings`→持有 `Context`；`Context` 是 RAII 类，独占队列、任务、连接槽、AEAD、虚拟网卡与密钥，生命周期方法（`prepare`/`start`/`stop`/析构）都在 `context.cpp`。
 - `tasks/io_task.cpp`：socket 的唯一所有者；并发连接槽数量由 Kconfig `EASYTIER_ESP_MAX_CONNECTED_PEERS`（默认 6）决定，**入口条目数不设上限**，其余入口轮换备用。不能把一个入口重复连接到两个槽，重试不得阻塞已有连接的收发。
 - `tasks/proto_task.cpp`：握手、保活、RPC、路由同步和路由快照发布；`tasks/data_task.cpp`：虚拟网卡数据、加解密与中继转发。
 - `main/`：应用示例，仅负责 NVS、事件循环、WiFi、加载 TOML 和 underlay 通知，不放协议实现。

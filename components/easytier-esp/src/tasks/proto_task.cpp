@@ -13,7 +13,7 @@
  *   M3 在同一入口填充真实拓扑与会话语义；
  * - 数据面报文（Data）在 M4 实现，这里只计数丢弃。
  */
-#include "context.hpp"
+#include "context.h"
 
 #if defined(ESP_PLATFORM)
 

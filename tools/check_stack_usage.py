@@ -28,7 +28,7 @@ PROJECT = Path(__file__).resolve().parent.parent
 COMPONENT_DIR = PROJECT / "components" / "easytier-esp"
 BUILD_DIR = PROJECT / "build"
 ELF = BUILD_DIR / "easytier-esp.elf"
-INSTANCE_CPP = COMPONENT_DIR / "src" / "inst.cpp"
+CONTEXT_CPP = COMPONENT_DIR / "src" / "context.cpp"
 
 # 任务入口符号 → (C++ 实现函数, 栈大小常量名)。
 #
@@ -113,15 +113,13 @@ def demangle(names: Set[str]) -> Dict[str, str]:
 
 
 def read_declared_stacks() -> Dict[str, int]:
-    """从 instance.cpp 读取各任务声明的栈大小（字节）。"""
-    text = INSTANCE_CPP.read_text()
+    """从 context.cpp 读取各任务声明的栈大小（字节）。"""
+    text = CONTEXT_CPP.read_text()
     declared: Dict[str, int] = {}
-    for const, _ in TASK_ENTRIES.items():
-        pass
     for symbol, (_root, const) in TASK_ENTRIES.items():
         match = re.search(rf"constexpr\s+uint32_t\s+{const}\s*=\s*(\d+)\s*;", text)
         if match is None:
-            raise SystemExit(f"instance.cpp 中找不到 {const} 的定义")
+            raise SystemExit(f"context.cpp 中找不到 {const} 的定义")
         declared[symbol] = int(match.group(1))
     return declared
 

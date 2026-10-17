@@ -15,7 +15,7 @@
  * - 连接断开/物理网络断开时上报事件（带槽位与代际）、递增该槽代际并关闭 socket；
  * - 绝不做解析、加解密或路由判断。
  */
-#include "context.hpp"
+#include "context.h"
 
 #if defined(ESP_PLATFORM)
 

@@ -12,7 +12,7 @@
  *
  * @note 控制面与数据面各持一个 AEAD 实例（互不共享）；本任务不做握手/RPC/路由计算。
  */
-#include "context.hpp"
+#include "context.h"
 
 #if defined(ESP_PLATFORM)
 
