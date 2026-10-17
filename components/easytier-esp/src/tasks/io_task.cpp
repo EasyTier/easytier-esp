@@ -44,9 +44,12 @@ struct FrameSink {
 
 }  // namespace
 
+/** @brief xTaskCreate 入口：转调非静态主循环（FreeRTOS 只接受普通函数指针）。 */
+void Context::io_entry(void* arg) noexcept { static_cast<Context*>(arg)->run_io(); }
+
 /** @brief 把槽的入口下标轮换到下一条（入口数为 0 时保持不变）。 */
-void Context::advance_peer_index(const Context& ctx, size_t& index) noexcept {
-    const size_t count = ctx.settings.peers.size();
+void Context::advance_peer_index(size_t& index) const noexcept {
+    const size_t count = settings.peers.size();
     index = count > 0 ? (index + 1) % count : 0;
 }
 
@@ -65,18 +68,24 @@ static uint32_t schedule_retry(SlotState& st) noexcept {
 
 /**
  * @brief 投递连接事件给控制面。
- * @note 事件只带槽位与代际：对端 peer id 由控制面自己从 `ctx.slots[slot].peer_id`
+ * @note 事件只带槽位与代际：对端 peer id 由控制面自己从 `slots[slot].peer_id`
  *       读取，避免同一条信息有两个真值来源。
  */
-void Context::post_event(Context& ctx, IoEvent kind, uint8_t slot, uint32_t generation) noexcept {
+void Context::post_event(IoEvent kind, uint8_t slot, uint32_t generation) noexcept {
     SmallMessage msg{};
     msg.kind = static_cast<uint8_t>(kind);
     msg.slot = slot;
     msg.generation = generation;
-    if (xQueueSend(ctx.q_evt, &msg, 0) != pdTRUE) {
+    if (xQueueSend(q_evt, &msg, 0) != pdTRUE) {
         // 事件队列满：控制面下一轮会发现连接状态变化，这里只记丢弃。
-        ctx.dropped.fetch_add(1);
+        dropped.fetch_add(1);
     }
+}
+
+/** @brief TcpConn 读回调适配器：取回所属实例后转调非静态 post_frame。 */
+void Context::post_frame_cb(void* arg, Bytes body) noexcept {
+    auto* sink = static_cast<FrameSink*>(arg);
+    sink->ctx->post_frame(sink->generation, body);
 }
 
 /**
@@ -84,35 +93,34 @@ void Context::post_event(Context& ctx, IoEvent kind, uint8_t slot, uint32_t gene
  * @details 只"偷看"PM 头的 packet_type 一个字节做分流：Data 给数据面，其余给控制面。
  *          分流后各自的队列都有独立额度，数据洪泛不会挤掉握手/Ping/RPC。
  */
-void Context::post_frame(void* arg, Bytes body) noexcept {
-    auto* sink = static_cast<FrameSink*>(arg);
+void Context::post_frame(uint32_t generation, Bytes body) noexcept {
     FrameMessage msg{};
-    msg.generation = sink->generation;
+    msg.generation = generation;
     msg.len = static_cast<uint16_t>(body.size());
     std::memcpy(msg.data.data(), body.data(), body.size());
 
     // PeerManagerHeader.packet_type 位于偏移 8（from_peer_id + to_peer_id 之后）。
     const bool is_data =
         body.size() > 8 && body[8] == static_cast<uint8_t>(PacketType::Data);
-    QueueHandle_t target = is_data ? sink->ctx->q_rx_data : sink->ctx->q_rx_ctrl;
+    QueueHandle_t target = is_data ? q_rx_data : q_rx_ctrl;
     if (xQueueSend(target, &msg, 0) != pdTRUE) {
-        sink->ctx->dropped.fetch_add(1);
+        dropped.fetch_add(1);
         ET_LOGW(kTag, "%s rx queue full, dropping frame", is_data ? "data" : "control");
     }
 }
 
 /** @brief 选择未被其它槽连接/连接中的入口；相同 host:port 只能占用一个槽。 */
-bool Context::select_entry(const Context& ctx, const std::array<SlotState, kMaxConnSlots>& states,
-                   size_t slot, size_t& index) noexcept {
-    const size_t count = ctx.settings.peers.size();
+bool Context::select_entry(const std::array<SlotState, kMaxConnSlots>& states, size_t slot,
+                           size_t& index) const noexcept {
+    const size_t count = settings.peers.size();
     for (size_t offset = 0; offset < count; ++offset) {
         const size_t candidate = (index + offset) % count;
-        const auto& peer = ctx.settings.peers[candidate];
+        const auto& peer = settings.peers[candidate];
         bool occupied = false;
         for (size_t other = 0; other < kMaxConnSlots; ++other) {
             if (other == slot || (!states[other].connecting && !states[other].session_open))
                 continue;
-            const auto& used = ctx.settings.peers[states[other].peer_index];
+            const auto& used = settings.peers[states[other].peer_index];
             if (used.port == peer.port && used.host == peer.host) {
                 occupied = true;
                 break;
@@ -145,8 +153,8 @@ static bool frame_sendable(const FrameMessage& tx, uint32_t slot_generation,
 }
 
 /** @brief 关闭一个槽并上报断开（仅在确实建立过会话时上报）。 */
-void Context::drop_slot(Context& ctx, size_t slot, SlotState& st) noexcept {
-    ConnSlot& conn_slot = ctx.slots[slot];
+void Context::drop_slot(size_t slot, SlotState& st) noexcept {
+    ConnSlot& conn_slot = slots[slot];
     const uint32_t generation = conn_slot.generation.load();
     if (conn_slot.conn != nullptr) {
         conn_slot.conn->close();
@@ -154,11 +162,11 @@ void Context::drop_slot(Context& ctx, size_t slot, SlotState& st) noexcept {
     conn_slot.peer_id.store(0);
     st.connecting = false;
     if (st.session_open) {
-        post_event(ctx, IoEvent::Disconnected, static_cast<uint8_t>(slot), generation);
+        post_event(IoEvent::Disconnected, static_cast<uint8_t>(slot), generation);
         st.session_open = false;
     }
     // 轮换入口并指数退避，避免对同一入口高频重试。
-    advance_peer_index(ctx, st.peer_index);
+    advance_peer_index(st.peer_index);
     (void)schedule_retry(st);
 }
 
@@ -169,13 +177,13 @@ void Context::drop_slot(Context& ctx, size_t slot, SlotState& st) noexcept {
  *          背压）必须保留队头等下一轮，绝不能丢；只有"根本没有任何槽匹配该帧"（目标
  *          连接不存在或代际已过期）才丢弃，否则会阻塞整个队列。
  */
-void Context::pump_tx(Context& ctx, std::array<SlotState, kMaxConnSlots>& states) noexcept {
+void Context::pump_tx(std::array<SlotState, kMaxConnSlots>& states) noexcept {
     FrameMessage tx{};
-    while (xQueuePeek(ctx.q_tx, &tx, 0) == pdTRUE) {
+    while (xQueuePeek(q_tx, &tx, 0) == pdTRUE) {
         bool matched = false;  ///< 是否有槽"认领"了这帧（即使暂时忙）
         bool queued = false;   ///< 是否已成功放进某个槽
         for (size_t i = 0; i < kMaxConnSlots; ++i) {
-            ConnSlot& conn_slot = ctx.slots[i];
+            ConnSlot& conn_slot = slots[i];
             if (!states[i].session_open || conn_slot.conn == nullptr ||
                 !conn_slot.conn->connected()) {
                 continue;
@@ -194,7 +202,7 @@ void Context::pump_tx(Context& ctx, std::array<SlotState, kMaxConnSlots>& states
             break;
         }
         if (queued) {
-            (void)xQueueReceive(ctx.q_tx, &tx, 0);  // 已入槽，出队
+            (void)xQueueReceive(q_tx, &tx, 0);  // 已入槽，出队
             continue;
         }
         if (matched) {
@@ -203,8 +211,8 @@ void Context::pump_tx(Context& ctx, std::array<SlotState, kMaxConnSlots>& states
         // 没有任何槽匹配：目标连接不存在/代际过期。此时必须丢弃，否则队头会一直
         // 阻塞后面的帧（例如对端断开后残留的同步请求）。
         if (tx.generation != 0 || tx.to_peer != 0) {
-            ctx.dropped.fetch_add(1);
-            (void)xQueueReceive(ctx.q_tx, &tx, 0);
+            dropped.fetch_add(1);
+            (void)xQueueReceive(q_tx, &tx, 0);
             continue;
         }
         break;  // 未指定目标的帧：等任一槽可用
@@ -212,14 +220,13 @@ void Context::pump_tx(Context& ctx, std::array<SlotState, kMaxConnSlots>& states
 }
 
 /** @brief I/O 任务主循环。 */
-void Context::io_task(void* arg) noexcept {
-    auto& ctx = *static_cast<Context*>(arg);
-    const size_t peer_count = ctx.settings.peers.size();
+void Context::run_io() noexcept {
+    const size_t peer_count = settings.peers.size();
     std::array<SlotState, kMaxConnSlots> states{};
     for (size_t i = 0; i < kMaxConnSlots; ++i) {
-        if (ctx.slots[i].conn == nullptr) {
+        if (slots[i].conn == nullptr) {
             ET_LOGE(kTag, "connection slot %u has no TcpConn", static_cast<unsigned>(i));
-            (void)xSemaphoreGive(ctx.task_exit);
+            (void)xSemaphoreGive(task_exit);
             return;
         }
         states[i].peer_index = peer_count > 0 ? (i % peer_count) : 0;
@@ -228,9 +235,9 @@ void Context::io_task(void* arg) noexcept {
 
     bool underlay_was_ready = false;  ///< 上一轮的物理网络状态（用于检测恢复）
 
-    while (!ctx.stop_requested.load()) {
+    while (!stop_requested.load()) {
         // 0) 物理网络恢复：复位退避，按初始节奏（1 秒）尽快重连，而不是等最长 30 秒。
-        const bool underlay_ready_now = ctx.underlay_ready.load();
+        const bool underlay_ready_now = underlay_ready.load();
         if (underlay_ready_now && !underlay_was_ready) {
             for (size_t i = 0; i < kMaxConnSlots; ++i) {
                 states[i].backoff_ms = kInitialBackoffMs;
@@ -242,14 +249,14 @@ void Context::io_task(void* arg) noexcept {
 
         // 1) 控制面要求某个槽重连（握手失败/超时）。
         SmallMessage cmd{};
-        while (xQueueReceive(ctx.q_io_cmd, &cmd, 0) == pdTRUE) {
+        while (xQueueReceive(q_io_cmd, &cmd, 0) == pdTRUE) {
             if (cmd.kind != static_cast<uint8_t>(IoCommand::Reconnect)) {
                 continue;
             }
             // 命令带的是该槽的会话代际（全局唯一），据此定位槽位。
             size_t slot = kMaxConnSlots;
             for (size_t i = 0; i < kMaxConnSlots; ++i) {
-                if (ctx.slots[i].generation.load() == cmd.generation &&
+                if (slots[i].generation.load() == cmd.generation &&
                     cmd.generation != 0) {
                     slot = i;
                     break;
@@ -258,15 +265,15 @@ void Context::io_task(void* arg) noexcept {
             if (slot == kMaxConnSlots) {
                 continue;  // 该代际已不是当前会话，忽略
             }
-            drop_slot(ctx, slot, states[slot]);
+            drop_slot(slot, states[slot]);
             states[slot].backoff_ms = kInitialBackoffMs;
         }
 
         // 2) 物理网络未就绪：关闭所有会话并等待。
-        if (!ctx.underlay_ready.load()) {
+        if (!underlay_ready.load()) {
             for (size_t i = 0; i < kMaxConnSlots; ++i) {
-                if (ctx.slots[i].conn->fd() != net::kInvalidSocket || states[i].connecting) {
-                    drop_slot(ctx, i, states[i]);
+                if (slots[i].conn->fd() != net::kInvalidSocket || states[i].connecting) {
+                    drop_slot(i, states[i]);
                     states[i].backoff_ms = kInitialBackoffMs;
                 }
                 states[i].connecting = false;
@@ -277,17 +284,17 @@ void Context::io_task(void* arg) noexcept {
 
         // 3) 逐槽建立连接（独立截止时间退避，不阻塞其它槽的收发与保活）。
         for (size_t i = 0; i < kMaxConnSlots; ++i) {
-            ConnSlot& conn_slot = ctx.slots[i];
+            ConnSlot& conn_slot = slots[i];
             SlotState& st = states[i];
             if (conn_slot.conn->connected() || st.connecting) {
                 continue;
             }
             if (i >= peer_count) continue;  // 入口少于槽数时让多出的槽闲置，不能取模重复连接
             if (!deadline_reached(now_ms(), st.retry_at_ms)) continue;
-            if (!select_entry(ctx, states, i, st.peer_index)) continue;
-            const PeerEndpoint& peer = ctx.settings.peers[st.peer_index];
+            if (!select_entry(states, i, st.peer_index)) continue;
+            const PeerEndpoint& peer = settings.peers[st.peer_index];
             if (!conn_slot.conn->begin_connect(peer.host, peer.port)) {
-                advance_peer_index(ctx, st.peer_index);
+                advance_peer_index(st.peer_index);
                 (void)schedule_retry(st);
                 continue;
             }
@@ -296,7 +303,7 @@ void Context::io_task(void* arg) noexcept {
 
         // 4) 处理连接中的槽。
         for (size_t i = 0; i < kMaxConnSlots; ++i) {
-            ConnSlot& conn_slot = ctx.slots[i];
+            ConnSlot& conn_slot = slots[i];
             SlotState& st = states[i];
             if (!st.connecting) {
                 continue;
@@ -304,7 +311,7 @@ void Context::io_task(void* arg) noexcept {
             const ConnectState st_connect = conn_slot.conn->poll_connect();
             if (st_connect == ConnectState::Failed) {
                 st.connecting = false;
-                advance_peer_index(ctx, st.peer_index);
+                advance_peer_index(st.peer_index);
                 const uint32_t retry_ms = schedule_retry(st);
                 ET_LOGW(kTag, "slot %u connect failed, retry in %u ms", static_cast<unsigned>(i),
                         static_cast<unsigned>(retry_ms));
@@ -316,15 +323,15 @@ void Context::io_task(void* arg) noexcept {
             st.connecting = false;
             st.backoff_ms = kInitialBackoffMs;
             st.session_open = true;
-            const uint32_t generation = ctx.generation.fetch_add(1) + 1;
+            const uint32_t generation = this->generation.fetch_add(1) + 1;
             conn_slot.generation.store(generation);
             conn_slot.peer_id.store(0);  // 握手成功后由控制面写入
-            ctx.state.store(State::Connecting);
-            post_event(ctx, IoEvent::Connected, static_cast<uint8_t>(i), generation);
+            state.store(State::Connecting);
+            post_event(IoEvent::Connected, static_cast<uint8_t>(i), generation);
         }
 
         // 5) 把待发帧搬进各槽。
-        pump_tx(ctx, states);
+        pump_tx(states);
 
         // 6) select：同时等待所有已连接槽的可读与可写。
         fd_set rfds;
@@ -335,7 +342,7 @@ void Context::io_task(void* arg) noexcept {
         bool any_pending = false;
         std::array<bool, kMaxConnSlots> want_write{};
         for (size_t i = 0; i < kMaxConnSlots; ++i) {
-            ConnSlot& conn_slot = ctx.slots[i];
+            ConnSlot& conn_slot = slots[i];
             if (!states[i].session_open || !conn_slot.conn->connected()) {
                 continue;
             }
@@ -369,19 +376,19 @@ void Context::io_task(void* arg) noexcept {
         //    每槽获得均等的写入预算（总量仍有上限），否则第二个槽只能每轮写 1 字节。
         const size_t tx_share = kTxBudgetBytes / kMaxConnSlots;
         for (size_t i = 0; i < kMaxConnSlots; ++i) {
-            ConnSlot& conn_slot = ctx.slots[i];
+            ConnSlot& conn_slot = slots[i];
             SlotState& st = states[i];
             if (!st.session_open || !conn_slot.conn->connected()) {
                 continue;
             }
             const int fd = conn_slot.conn->fd();
-            FrameSink sink{&ctx, conn_slot.generation.load()};
+            FrameSink sink{this, conn_slot.generation.load()};
 
             if (ready > 0 && FD_ISSET(fd, &rfds)) {
                 size_t frames = 0;
-                if (!conn_slot.conn->read_available(&sink, &post_frame, frames)) {
+                if (!conn_slot.conn->read_available(&sink, &Context::post_frame_cb, frames)) {
                     ET_LOGI(kTag, "slot %u peer connection lost", static_cast<unsigned>(i));
-                    drop_slot(ctx, i, st);
+                    drop_slot(i, st);
                     continue;
                 }
             }
@@ -390,7 +397,7 @@ void Context::io_task(void* arg) noexcept {
                 if (!conn_slot.conn->flush(tx_share)) {
                     ET_LOGW(kTag, "slot %u send failed, dropping connection",
                             static_cast<unsigned>(i));
-                    drop_slot(ctx, i, st);
+                    drop_slot(i, st);
                     continue;
                 }
             }
@@ -398,10 +405,10 @@ void Context::io_task(void* arg) noexcept {
             // 接收缓冲里可能还有完整帧（上一轮帧预算用尽），立刻切分。
             while (conn_slot.conn->connected() &&
                    conn_slot.conn->rx_buffered() >= kTcpTunnelHeaderSize) {
-                FrameSink more_sink{&ctx, conn_slot.generation.load()};
+                FrameSink more_sink{this, conn_slot.generation.load()};
                 size_t frames = 0;
-                if (!conn_slot.conn->read_available(&more_sink, &post_frame, frames)) {
-                    drop_slot(ctx, i, st);
+                if (!conn_slot.conn->read_available(&more_sink, &Context::post_frame_cb, frames)) {
+                    drop_slot(i, st);
                     break;
                 }
                 if (frames == 0) {
@@ -412,16 +419,16 @@ void Context::io_task(void* arg) noexcept {
     }
 
     for (size_t i = 0; i < kMaxConnSlots; ++i) {
-        ConnSlot& conn_slot = ctx.slots[i];
+        ConnSlot& conn_slot = slots[i];
         if (conn_slot.conn != nullptr) {
             conn_slot.conn->close();
         }
         if (states[i].session_open) {
-            post_event(ctx, IoEvent::Disconnected, static_cast<uint8_t>(i),
+            post_event(IoEvent::Disconnected, static_cast<uint8_t>(i),
                        conn_slot.generation.load());
         }
     }
-    (void)xSemaphoreGive(ctx.task_exit);
+    (void)xSemaphoreGive(task_exit);
 }
 
 }  // namespace et

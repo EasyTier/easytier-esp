@@ -32,12 +32,12 @@ CONTEXT_CPP = COMPONENT_DIR / "src" / "context.cpp"
 
 # 任务入口 → (调用图根函数, 栈大小常量名)。
 #
-# 任务入口是 `et::Context` 的私有静态成员（`xTaskCreate` 直接使用其函数指针），
-# 没有额外的 `extern "C"` 包装层，因此入口即根函数。
+# 入口是 `xTaskCreate` 用的 static 适配器（`io_entry` 等），只做一次强制转换就转调
+# 非静态主循环；分析从主循环开始，再把适配器自身的帧加上去。
 TASK_ENTRIES = {
-    "et::Context::io_task": ("et::Context::io_task", "kIoTaskStack"),
-    "et::Context::proto_task": ("et::Context::proto_task", "kProtoTaskStack"),
-    "et::Context::data_task": ("et::Context::data_task", "kDataTaskStack"),
+    "et::Context::io_entry": ("et::Context::run_io", "kIoTaskStack"),
+    "et::Context::proto_entry": ("et::Context::run_proto", "kProtoTaskStack"),
+    "et::Context::data_entry": ("et::Context::run_data", "kDataTaskStack"),
 }
 
 # 每层函数调用的额外开销（返回地址 + 对齐等）的保守估计。
@@ -223,8 +223,11 @@ def main() -> int:
     print(f"{'任务':<20}{'预算(B)':>10}{'最坏链(B)':>12}{'余量(B)':>10}  判定")
     for entry, budget in sorted(declared.items(), key=lambda kv: kv[1]):
         root, _const = TASK_ENTRIES[entry]
-        # 入口即根函数（Context 的私有静态成员，无包装层），从根函数开始求最坏链。
+        # 入口适配器自身的帧 + 非静态主循环的调用链。
+        stub = frames.get(normalize(entry), 0) + CALL_OVERHEAD
         total, path = worst_path(normalized_graph, frames, normalize(root))
+        total += stub
+        path = [normalize(entry)] + path
         margin = budget - total
         verdict = "OK" if margin > 0 else "超预算"
         if margin <= 0:

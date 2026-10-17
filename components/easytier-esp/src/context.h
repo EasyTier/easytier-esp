@@ -9,7 +9,8 @@
  * - **代际（generation）**：每次新建连接都会递增，旧代际的收发数据一律丢弃，
  *   从而避免 fd 复用或旧数据串到新连接上；
  * - **封装**：全部状态与资源都是 private；只有 @ref et::Inst 通过友元读取快照，
- *   任务实现本身是 @ref Context 的私有静态成员（定义在 tasks 目录的 *_task.cpp）。
+ *   任务实现是 @ref Context 的私有成员函数（定义在 tasks 目录的 *_task.cpp），
+ *   只有 xTaskCreate / 平台回调所需的入口保持 static 适配器。
  */
 #pragma once
 
@@ -117,8 +118,8 @@ struct SlotState {
  * // 析构：若仍在运行则无限等待，再释放资源并清零密钥
  * @endcode
  *
- * 全部数据成员都是 private：任务实现作为 @ref Context 的私有静态成员（定义在
- * tasks 目录的 `*_task.cpp`）直接访问；@ref et::Inst 通过友元读取状态/配置快照。
+ * 全部数据成员都是 private：任务实现是 @ref Context 的私有成员函数（定义在
+ * tasks 目录的 `*_task.cpp`）直接用 this 访问；@ref et::Inst 通过友元读取状态/配置快照。
  * 多个实例各持一份，互不共享。
  */
 class Context final {
@@ -159,47 +160,50 @@ private:
     friend class Inst;  ///< 公共快照（get_status/get_config_info）由 Inst 直接读取
 
 #if defined(ESP_PLATFORM)
-    // ---- 任务实现（定义在 tasks 目录的 *_task.cpp）--------------------------------------
-    static void io_task(void* arg) noexcept;     ///< I/O 任务主循环
-    static void proto_task(void* arg) noexcept;  ///< 控制面任务主循环
-    static void data_task(void* arg) noexcept;   ///< 数据面任务主循环
+    // ---- 任务入口（平台回调必须是普通函数指针，因此保持 static 适配器）----------------
+    static void io_entry(void* arg) noexcept;     ///< xTaskCreate 入口 → run_io()
+    static void proto_entry(void* arg) noexcept;  ///< xTaskCreate 入口 → run_proto()
+    static void data_entry(void* arg) noexcept;   ///< xTaskCreate 入口 → run_data()
+    static void post_frame_cb(void* arg, Bytes body) noexcept;  ///< TcpConn 读回调适配器
+    static esp_err_t handle_ospf_sync_cb(void* ctx_ptr, Bytes request, MutBytes response,
+                                         size_t& response_len) noexcept;  ///< RPC 服务回调
+
+    // ---- 任务主循环（非静态，直接使用 this）-------------------------------------------
+    void run_io() noexcept;     ///< I/O 任务主循环（定义见 tasks/io_task.cpp）
+    void run_proto() noexcept;  ///< 控制面任务主循环（定义见 tasks/proto_task.cpp）
+    void run_data() noexcept;   ///< 数据面任务主循环（定义见 tasks/data_task.cpp）
 
     // I/O 任务
-    static void advance_peer_index(const Context& ctx, size_t& index) noexcept;
-    static void post_event(Context& ctx, IoEvent kind, uint8_t slot, uint32_t generation) noexcept;
-    static void post_frame(void* arg, Bytes body) noexcept;
-    static bool select_entry(const Context& ctx,
-                             const std::array<SlotState, kMaxConnSlots>& states, size_t slot,
-                             size_t& index) noexcept;
-    static void drop_slot(Context& ctx, size_t slot, SlotState& st) noexcept;
-    static void pump_tx(Context& ctx, std::array<SlotState, kMaxConnSlots>& states) noexcept;
+    void advance_peer_index(size_t& index) const noexcept;
+    void post_event(IoEvent kind, uint8_t slot, uint32_t generation) noexcept;
+    void post_frame(uint32_t generation, Bytes body) noexcept;
+    bool select_entry(const std::array<SlotState, kMaxConnSlots>& states, size_t slot,
+                      size_t& index) const noexcept;
+    void drop_slot(size_t slot, SlotState& st) noexcept;
+    void pump_tx(std::array<SlotState, kMaxConnSlots>& states) noexcept;
 
     // 控制面任务
-    static bool send_frame(Context& ctx, uint32_t generation, Bytes body) noexcept;
-    static bool send_control_frame(Context& ctx, uint32_t generation, PacketType type,
-                                  uint32_t from_peer, uint32_t to_peer, Bytes plain,
-                                  bool encrypt) noexcept;
-    static bool send_rpc_message(Context& ctx, uint32_t generation, const RpcSendTemplate& tmpl,
-                                 Bytes content) noexcept;
-    static void request_reconnect(Context& ctx, uint32_t generation) noexcept;
-    static uint32_t peer_of_generation(const Context& ctx, uint32_t generation) noexcept;
-    static void revoke_ready(Context& ctx, esp_err_t err) noexcept;
-    static void handle_rpc_request(Context& ctx, uint32_t generation,
-                                   const RpcPacketRef& packet, Bytes body) noexcept;
-    static bool send_sync_request(Context& ctx, uint32_t generation, uint32_t remote_peer_id,
-                                  bool include_topology, uint32_t now) noexcept;
-    static esp_err_t handle_ospf_sync(void* ctx_ptr, Bytes request, MutBytes response,
-                                      size_t& response_len) noexcept;
-    static void sync_netif_address(Context& ctx) noexcept;
-    static void handle_rpc_response(Context& ctx, uint32_t generation,
-                                    const RpcPacketRef& packet, Bytes body) noexcept;
+    bool send_frame(uint32_t generation, Bytes body) noexcept;
+    bool send_control_frame(uint32_t generation, PacketType type, uint32_t from_peer,
+                            uint32_t to_peer, Bytes plain, bool encrypt) noexcept;
+    bool send_rpc_message(uint32_t generation, const RpcSendTemplate& tmpl,
+                          Bytes content) noexcept;
+    void request_reconnect(uint32_t generation) noexcept;
+    uint32_t peer_of_generation(uint32_t generation) const noexcept;
+    void revoke_ready(esp_err_t err) noexcept;
+    void handle_rpc_request(uint32_t generation, const RpcPacketRef& packet, Bytes body) noexcept;
+    bool send_sync_request(uint32_t generation, uint32_t remote_peer_id, bool include_topology,
+                           uint32_t now) noexcept;
+    esp_err_t handle_ospf_sync(Bytes request, MutBytes response, size_t& response_len) noexcept;
+    void sync_netif_address() noexcept;
+    void handle_rpc_response(uint32_t generation, const RpcPacketRef& packet, Bytes body) noexcept;
 
     // 数据面任务
-    static void deliver_to_netif(Context& ctx, Bytes ip_packet) noexcept;
-    static void send_data_frame(Context& ctx, uint32_t generation, uint32_t to_peer,
-                                uint32_t next_hop, Bytes ip_packet) noexcept;
-    static void handle_netif_output(Context& ctx, const NetifRxItem& item) noexcept;
-    static void handle_inbound_data(Context& ctx, FrameMessage& frame) noexcept;
+    void deliver_to_netif(Bytes ip_packet) noexcept;
+    void send_data_frame(uint32_t generation, uint32_t to_peer, uint32_t next_hop,
+                         Bytes ip_packet) noexcept;
+    void handle_netif_output(const NetifRxItem& item) noexcept;
+    void handle_inbound_data(FrameMessage& frame) noexcept;
 #endif
 
     /** @brief 记录一次错误（保留首个错误，便于定位根因）。 */

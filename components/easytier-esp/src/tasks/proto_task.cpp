@@ -55,14 +55,17 @@ constexpr uint32_t kMinReverseSyncMs = 1000;
 
 }  // namespace
 
+/** @brief xTaskCreate 入口：转调非静态主循环（FreeRTOS 只接受普通函数指针）。 */
+void Context::proto_entry(void* arg) noexcept { static_cast<Context*>(arg)->run_proto(); }
+
 /** @brief 把一帧投递给 I/O 任务发送（带代际，旧代际会被丢弃）。 */
-bool Context::send_frame(Context& ctx, uint32_t generation, Bytes body) noexcept {
+bool Context::send_frame(uint32_t generation, Bytes body) noexcept {
     FrameMessage msg{};
     msg.generation = generation;
     msg.len = static_cast<uint16_t>(body.size());
     std::memcpy(msg.data.data(), body.data(), body.size());
-    if (xQueueSend(ctx.q_tx, &msg, 0) != pdTRUE) {
-        ctx.dropped.fetch_add(1);
+    if (xQueueSend(q_tx, &msg, 0) != pdTRUE) {
+        dropped.fetch_add(1);
         return false;
     }
     return true;
@@ -73,10 +76,10 @@ bool Context::send_frame(Context& ctx, uint32_t generation, Bytes body) noexcept
  * @param encrypt 是否加密（RPC 跟随 `enable_encryption`；握手/Ping/Pong 永不加密）
  * @note PM 头的 len 保存**加密前的明文长度**，这是与上游互通的关键。
  */
-bool Context::send_control_frame(Context& ctx, uint32_t generation, PacketType type, uint32_t from_peer,
-                        uint32_t to_peer, Bytes plain, bool encrypt) noexcept {
+bool Context::send_control_frame(uint32_t generation, PacketType type, uint32_t from_peer,
+                                 uint32_t to_peer, Bytes plain, bool encrypt) noexcept {
     if (plain.size() > kMaxPlainPayload) {
-        ctx.dropped.fetch_add(1);
+        dropped.fetch_add(1);
         return false;
     }
     PeerManagerHeader hdr{};
@@ -90,58 +93,58 @@ bool Context::send_control_frame(Context& ctx, uint32_t generation, PacketType t
 
     size_t body_len = 0;
     if (encrypt) {
-        if (ctx.control_cipher == nullptr || !ctx.control_cipher->ready()) {
-            ctx.set_error(ESP_ERR_INVALID_STATE);
+        if (control_cipher == nullptr || !control_cipher->ready()) {
+            set_error(ESP_ERR_INVALID_STATE);
             return false;
         }
-        const size_t written = ctx.control_cipher->encrypt_random_nonce(
-            plain, MutBytes(ctx.rpc_frame.data() + kPeerManagerHeaderSize,
-                            ctx.rpc_frame.size() - kPeerManagerHeaderSize));
+        const size_t written = control_cipher->encrypt_random_nonce(
+            plain, MutBytes(rpc_frame.data() + kPeerManagerHeaderSize,
+                            rpc_frame.size() - kPeerManagerHeaderSize));
         if (written == 0) {
-            ctx.set_error(ESP_FAIL);
-            ctx.dropped.fetch_add(1);
+            set_error(ESP_FAIL);
+            dropped.fetch_add(1);
             return false;
         }
         body_len = kPeerManagerHeaderSize + written;
     } else {
-        if (kPeerManagerHeaderSize + plain.size() > ctx.rpc_frame.size()) {
-            ctx.dropped.fetch_add(1);
+        if (kPeerManagerHeaderSize + plain.size() > rpc_frame.size()) {
+            dropped.fetch_add(1);
             return false;
         }
-        std::memcpy(ctx.rpc_frame.data() + kPeerManagerHeaderSize, plain.data(), plain.size());
+        std::memcpy(rpc_frame.data() + kPeerManagerHeaderSize, plain.data(), plain.size());
         body_len = kPeerManagerHeaderSize + plain.size();
     }
-    encode_peer_manager_header(MutBytes(ctx.rpc_frame.data(), kPeerManagerHeaderSize), hdr);
-    return send_frame(ctx, generation, Bytes(ctx.rpc_frame.data(), body_len));
+    encode_peer_manager_header(MutBytes(rpc_frame.data(), kPeerManagerHeaderSize), hdr);
+    return send_frame(generation, Bytes(rpc_frame.data(), body_len));
 }
 
 /**
  * @brief 按上游预算分片发送一个 RPC 消息（内容为 RpcRequest/RpcResponse 的编码）。
  * @param content 已编码的服务入参/返回值
  */
-bool Context::send_rpc_message(Context& ctx, uint32_t generation, const RpcSendTemplate& tmpl,
-                      Bytes content) noexcept {
+bool Context::send_rpc_message(uint32_t generation, const RpcSendTemplate& tmpl,
+                               Bytes content) noexcept {
     RpcPlan plan;
     if (!plan_rpc_slices(tmpl, content.size(), plan)) {
-        ctx.set_error(ESP_ERR_INVALID_SIZE);
-        ctx.dropped.fetch_add(1);
+        set_error(ESP_ERR_INVALID_SIZE);
+        dropped.fetch_add(1);
         return false;
     }
     for (size_t i = 0; i < plan.count; ++i) {
         const RpcSlice& slice = plan.slices[i];
         const size_t encoded = encode_rpc_piece(
             tmpl, Bytes(content.data() + slice.offset, slice.len),
-            static_cast<uint32_t>(plan.count), static_cast<uint32_t>(i), ctx.rpc_plain);
+            static_cast<uint32_t>(plan.count), static_cast<uint32_t>(i), rpc_plain);
         if (encoded == 0) {
-            ctx.set_error(ESP_ERR_INVALID_SIZE);
-            ctx.dropped.fetch_add(1);
+            set_error(ESP_ERR_INVALID_SIZE);
+            dropped.fetch_add(1);
             return false;
         }
         const PacketType type = tmpl.is_request ? PacketType::RpcReq : PacketType::RpcResp;
         // RPC 与数据共用同一个加密开关：关闭时不加 AEAD 尾也不置加密位。
-        if (!send_control_frame(ctx, generation, type, tmpl.from_peer, tmpl.to_peer,
-                                Bytes(ctx.rpc_plain.data(), encoded),
-                                /*encrypt=*/ctx.settings.enable_encryption)) {
+        if (!send_control_frame(generation, type, tmpl.from_peer, tmpl.to_peer,
+                                Bytes(rpc_plain.data(), encoded),
+                                /*encrypt=*/settings.enable_encryption)) {
             return false;
         }
     }
@@ -152,12 +155,12 @@ bool Context::send_rpc_message(Context& ctx, uint32_t generation, const RpcSendT
  * @brief 要求 I/O 断开并重连某个槽。
  * @param generation 该槽当前的会话代际（I/O 任务据此定位槽位）
  */
-void Context::request_reconnect(Context& ctx, uint32_t generation) noexcept {
+void Context::request_reconnect(uint32_t generation) noexcept {
     SmallMessage msg{};
     msg.kind = static_cast<uint8_t>(IoCommand::Reconnect);
     msg.generation = generation;
-    if (xQueueSend(ctx.q_io_cmd, &msg, 0) != pdTRUE) {
-        ctx.dropped.fetch_add(1);
+    if (xQueueSend(q_io_cmd, &msg, 0) != pdTRUE) {
+        dropped.fetch_add(1);
     }
 }
 
@@ -165,10 +168,10 @@ void Context::request_reconnect(Context& ctx, uint32_t generation) noexcept {
  * @brief 由会话代际反查该连接的对端 peer id。
  * @details 代际由全局计数器分配，因此一个代际唯一对应一个连接槽。
  */
-uint32_t Context::peer_of_generation(const Context& ctx, uint32_t generation) noexcept {
+uint32_t Context::peer_of_generation(uint32_t generation) const noexcept {
     for (size_t i = 0; i < kMaxConnSlots; ++i) {
-        if (ctx.slots[i].generation.load() == generation) {
-            return ctx.slots[i].peer_id.load();
+        if (slots[i].generation.load() == generation) {
+            return slots[i].peer_id.load();
         }
     }
     return kInvalidPeerId;
@@ -183,57 +186,57 @@ uint32_t Context::peer_of_generation(const Context& ctx, uint32_t generation) no
  *          无法判断组网其实已不可用。这里把状态切到 @ref State::Error 并在**曾经
  *          上报过 Ready** 时补发一次错误事件（避免每个 zstd 报文都刷事件）。
  */
-void Context::revoke_ready(Context& ctx, esp_err_t err) noexcept {
-    ctx.set_error(err);
-    ctx.dropped.fetch_add(1);
-    if (ctx.network_ready_reported) {
-        ctx.network_ready_reported = false;
-        ctx.state.store(State::Error);
-        ctx.emit(EventType::Error);
+void Context::revoke_ready(esp_err_t err) noexcept {
+    set_error(err);
+    dropped.fetch_add(1);
+    if (network_ready_reported) {
+        network_ready_reported = false;
+        state.store(State::Error);
+        emit(EventType::Error);
     }
 }
 
 /** @brief 处理一个完整的 RPC 请求（目标为本机）。 */
-void Context::handle_rpc_request(Context& ctx, uint32_t generation, const RpcPacketRef& packet,
-                        Bytes body) noexcept {
-    const uint32_t my_peer_id = ctx.my_peer_id.load();
+void Context::handle_rpc_request(uint32_t generation, const RpcPacketRef& packet,
+                                Bytes body) noexcept {
+    const uint32_t my_peer_id = this->my_peer_id.load();
     if (packet.to_peer != my_peer_id) {
         // 调用方已按 to_peer 把非本地目标的 RPC 转发走；这里只做防御性丢弃。
-        ctx.dropped.fetch_add(1);
+        dropped.fetch_add(1);
         return;
     }
     if (!packet.has_descriptor) {
-        ctx.dropped.fetch_add(1);
+        dropped.fetch_add(1);
         return;
     }
     if (packet.has_compression && packet.compression.algo == kCompressionZstd) {
         ET_LOGE(kTag, "peer used zstd compression, which this profile does not support");
-        revoke_ready(ctx, ESP_ERR_NOT_SUPPORTED);
+        revoke_ready(ESP_ERR_NOT_SUPPORTED);
         return;
     }
     RpcRequestRef request{};
     if (!decode_rpc_request(body, request)) {
-        ctx.dropped.fetch_add(1);
+        dropped.fetch_add(1);
         return;
     }
 
     size_t service_len = 0;
-    const esp_err_t service_err = ctx.registry.dispatch(packet.descriptor, request.request,
-                                                        ctx.rpc_service_out, service_len);
+    const esp_err_t service_err = registry.dispatch(packet.descriptor, request.request,
+                                                        rpc_service_out, service_len);
 
     // 组装 RpcResponse（成功时带服务返回值，失败时带 error.Error）。
     Bytes error_raw{};
     if (service_err != ESP_OK) {
-        const size_t error_len = encode_error_execute("rpc failed", ctx.rpc_error);
+        const size_t error_len = encode_error_execute("rpc failed", rpc_error);
         if (error_len != 0) {
-            error_raw = Bytes(ctx.rpc_error.data(), error_len);
+            error_raw = Bytes(rpc_error.data(), error_len);
         }
     }
     size_t body_len = 0;
     if (!encode_rpc_response_checked(
-            service_err == ESP_OK ? Bytes(ctx.rpc_service_out.data(), service_len) : Bytes{},
-            error_raw, 0, ctx.rpc_body, body_len)) {
-        ctx.dropped.fetch_add(1);
+            service_err == ESP_OK ? Bytes(rpc_service_out.data(), service_len) : Bytes{},
+            error_raw, 0, rpc_body, body_len)) {
+        dropped.fetch_add(1);
         return;
     }
 
@@ -245,7 +248,7 @@ void Context::handle_rpc_request(Context& ctx, uint32_t generation, const RpcPac
     tmpl.trace_id = packet.trace_id;
     tmpl.compression.algo = kCompressionNone;
     tmpl.compression.accepted_algo = kCompressionNone;
-    (void)send_rpc_message(ctx, generation, tmpl, Bytes(ctx.rpc_body.data(), body_len));
+    (void)send_rpc_message(generation, tmpl, Bytes(rpc_body.data(), body_len));
 }
 
 /** @brief 检查虚拟网段是否与物理网卡网段重叠（定义见下方）。 */
@@ -255,39 +258,39 @@ static bool physical_subnet_overlaps(uint32_t addr, uint8_t prefix) noexcept;
  * @brief 发送一次同步请求（请求内容由 SyncEngine 构造）。
  * @param include_topology 是否携带本节点信息与邻接（首包与补发时为 true）
  */
-bool Context::send_sync_request(Context& ctx, uint32_t generation, uint32_t remote_peer_id,
-                       bool include_topology, uint32_t now) noexcept {
+bool Context::send_sync_request(uint32_t generation, uint32_t remote_peer_id,
+                               bool include_topology, uint32_t now) noexcept {
     const int64_t transaction_id =
-        ctx.transactions.allocate(generation, now, kRpcTimeoutMs);
+        transactions.allocate(generation, now, kRpcTimeoutMs);
     if (transaction_id == 0) {
         return false;
     }
     const size_t request_len =
-        ctx.sync.build_request(ctx.sync_request_raw, include_topology, remote_peer_id);
+        sync.build_request(sync_request_raw, include_topology, remote_peer_id);
     if (request_len == 0) {
-        ctx.dropped.fetch_add(1);
+        dropped.fetch_add(1);
         return false;
     }
     const size_t body_len = encode_rpc_request(
-        Bytes(ctx.sync_request_raw.data(), request_len), kRpcTimeoutMs, ctx.sync_rpc_raw);
+        Bytes(sync_request_raw.data(), request_len), kRpcTimeoutMs, sync_rpc_raw);
     if (body_len == 0) {
-        ctx.dropped.fetch_add(1);
+        dropped.fetch_add(1);
         return false;
     }
 
     RpcSendTemplate tmpl{};
-    tmpl.from_peer = ctx.my_peer_id.load();
+    tmpl.from_peer = my_peer_id.load();
     tmpl.to_peer = remote_peer_id;
     tmpl.transaction_id = transaction_id;
     tmpl.is_request = true;
     tmpl.trace_id = 0;
-    tmpl.descriptor.domain_name = ctx.settings.network_name;
+    tmpl.descriptor.domain_name = settings.network_name;
     tmpl.descriptor.proto_name = kOspfProtoName;
     tmpl.descriptor.service_name = kOspfServiceName;
     tmpl.descriptor.method_index = kOspfSyncMethodIndex;
     tmpl.compression.algo = kCompressionNone;
     tmpl.compression.accepted_algo = kCompressionNone;
-    return send_rpc_message(ctx, generation, tmpl, Bytes(ctx.sync_rpc_raw.data(), body_len));
+    return send_rpc_message(generation, tmpl, Bytes(sync_rpc_raw.data(), body_len));
 }
 
 /**
@@ -295,11 +298,15 @@ bool Context::send_sync_request(Context& ctx, uint32_t generation, uint32_t remo
  * @details 合并对端拓扑、收集 missing 列表并返回本节点会话信息；**响应本身不携带
  *          拓扑**，因此应答方还要主动发送自己的同步请求（由主循环触发）。
  */
-esp_err_t Context::handle_ospf_sync(void* ctx_ptr, Bytes request, MutBytes response,
-                           size_t& response_len) noexcept {
-    auto& ctx = *static_cast<Context*>(ctx_ptr);
+esp_err_t Context::handle_ospf_sync_cb(void* ctx_ptr, Bytes request, MutBytes response,
+                              size_t& response_len) noexcept {
+    return static_cast<Context*>(ctx_ptr)->handle_ospf_sync(request, response, response_len);
+}
+
+esp_err_t Context::handle_ospf_sync(Bytes request, MutBytes response,
+                                    size_t& response_len) noexcept {
     response_len = 0;
-    const esp_err_t err = ctx.sync.handle_request(request, response, response_len, now_ms());
+    const esp_err_t err = sync.handle_request(request, response, response_len, now_ms());
     if (err != ESP_OK) {
         ET_LOGW(kTag, "cannot handle SyncRouteInfo request: 0x%x", err);
     }
@@ -309,38 +316,38 @@ esp_err_t Context::handle_ospf_sync(void* ctx_ptr, Bytes request, MutBytes respo
 /**
  * @brief 把引擎当前的虚拟地址落到网卡上（创建或改址），并做物理网段重叠检查。
  */
-void Context::sync_netif_address(Context& ctx) noexcept {
-    const uint32_t address = ctx.sync.my_ipv4();
-    const uint8_t prefix = ctx.sync.my_prefix();
+void Context::sync_netif_address() noexcept {
+    const uint32_t address = sync.my_ipv4();
+    const uint8_t prefix = sync.my_prefix();
     if (address == 0) {
         return;
     }
     if (physical_subnet_overlaps(address, prefix)) {
         ET_LOGE(kTag, "virtual subnet overlaps the physical LAN, refusing to touch the netif");
-        ctx.set_error(ESP_ERR_INVALID_ARG);
+        set_error(ESP_ERR_INVALID_ARG);
         return;
     }
-    if (!ctx.netif_created) {
-        const esp_err_t err = ctx.virtual_netif.create(address, prefix, ctx.settings.mtu,
-                                                       static_cast<void*>(ctx.q_netif_rx),
-                                                       &ctx.generation);
-        ctx.netif_created = err == ESP_OK;
+    if (!netif_created) {
+        const esp_err_t err = virtual_netif.create(address, prefix, settings.mtu,
+                                                       static_cast<void*>(q_netif_rx),
+                                                       &generation);
+        netif_created = err == ESP_OK;
         if (err != ESP_OK) {
-            ctx.set_error(err);
+            set_error(err);
             return;
         }
-    } else if (ctx.netif_ip != address || ctx.my_prefix.load() != prefix) {
-        const esp_err_t err = ctx.virtual_netif.set_address(address, prefix);
+    } else if (netif_ip != address || my_prefix.load() != prefix) {
+        const esp_err_t err = virtual_netif.set_address(address, prefix);
         if (err != ESP_OK) {
-            ctx.set_error(err);
+            set_error(err);
             return;
         }
     }
     // 网卡成功采用地址后更新公开状态，必须先于 NetworkReady 回调。
-    ctx.my_ipv4.store(address);
-    ctx.my_prefix.store(prefix);
-    ctx.netif_ip = address;
-    (void)ctx.virtual_netif.set_link(true);
+    my_ipv4.store(address);
+    my_prefix.store(prefix);
+    netif_ip = address;
+    (void)virtual_netif.set_link(true);
 }
 
 /**
@@ -372,20 +379,20 @@ static bool physical_subnet_overlaps(uint32_t addr, uint8_t prefix) noexcept {
  * @details 响应只带 missing 列表：如果对方缺少我们的信息（例如它比我们更早启动），
  *          必须立即补发一次带拓扑的同步请求；压缩信息为 Zstd 时按不支持处理。
  */
-void Context::handle_rpc_response(Context& ctx, uint32_t generation, const RpcPacketRef& packet,
-                         Bytes body) noexcept {
-    if (!ctx.transactions.complete(packet.transaction_id, generation)) {
-        ctx.dropped.fetch_add(1);  // 未知事务或旧代际的迟到响应
+void Context::handle_rpc_response(uint32_t generation, const RpcPacketRef& packet,
+                                 Bytes body) noexcept {
+    if (!transactions.complete(packet.transaction_id, generation)) {
+        dropped.fetch_add(1);  // 未知事务或旧代际的迟到响应
         return;
     }
     if (packet.has_compression && packet.compression.algo == kCompressionZstd) {
         ET_LOGE(kTag, "peer responded with zstd compression, unsupported");
-        revoke_ready(ctx, ESP_ERR_NOT_SUPPORTED);
+        revoke_ready(ESP_ERR_NOT_SUPPORTED);
         return;
     }
     RpcResponseRef response{};
     if (!decode_rpc_response(body, response)) {
-        ctx.dropped.fetch_add(1);
+        dropped.fetch_add(1);
         return;
     }
     if (response.has_error) {
@@ -394,32 +401,31 @@ void Context::handle_rpc_response(Context& ctx, uint32_t generation, const RpcPa
         return;
     }
     bool need_resend = false;
-    if (ctx.sync.handle_response(response.response, need_resend) != ESP_OK) {
-        ctx.dropped.fetch_add(1);
+    if (sync.handle_response(response.response, need_resend) != ESP_OK) {
+        dropped.fetch_add(1);
         return;
     }
     // 对端缺少我们的信息：立即补发（受主循环的最小间隔限制）。
-    const uint32_t peer_id = peer_of_generation(ctx, generation);
+    const uint32_t peer_id = peer_of_generation(generation);
     if (need_resend && peer_id != kInvalidPeerId) {
-        (void)send_sync_request(ctx, generation, peer_id, /*include_topology=*/true, now_ms());
+        (void)send_sync_request(generation, peer_id, /*include_topology=*/true, now_ms());
     }
 }
 
 /** @brief 控制面任务主循环。 */
-void Context::proto_task(void* arg) noexcept {
-    auto& ctx = *static_cast<Context*>(arg);
+void Context::run_proto() noexcept {
 
     HandshakeExpectation expect{};
-    expect.network_name = ctx.settings.network_name;
-    expect.digest = ctx.digest;
-    expect.my_peer_id = ctx.my_peer_id.load();
+    expect.network_name = settings.network_name;
+    expect.digest = digest;
+    expect.my_peer_id = my_peer_id.load();
 
     // 注册 OSPF 路由同步服务（由 SyncEngine 合并拓扑并返回本机会话信息）。
-    if (ctx.registry.size() == 0) {
-        const RpcServiceId id{ctx.settings.network_name, kOspfProtoName, kOspfServiceName,
+    if (registry.size() == 0) {
+        const RpcServiceId id{settings.network_name, kOspfProtoName, kOspfServiceName,
                               kOspfSyncMethodIndex};
-        if (!ctx.registry.add(id, &handle_ospf_sync, &ctx)) {
-            ctx.set_error(ESP_FAIL);
+        if (!registry.add(id, &Context::handle_ospf_sync_cb, this)) {
+            set_error(ESP_FAIL);
         }
     }
 
@@ -434,60 +440,60 @@ void Context::proto_task(void* arg) noexcept {
     uint32_t last_sync_ms = 0;  ///< 上次发起路由同步的时间
 
     /** @brief 把各槽已握手的对端集合同步给 SyncEngine（拓扑的邻接行由此得出）。 */
-    const auto publish_direct_peers = [&ctx, &peer_up, &session_generation]() {
+    const auto publish_direct_peers = [this, &peer_up, &session_generation]() {
         std::array<uint32_t, kMaxConnSlots> peers{};
         size_t count = 0;
         for (size_t i = 0; i < kMaxConnSlots; ++i) {
             if (peer_up[i] && session_generation[i] != 0) {
-                peers[count++] = ctx.slots[i].peer_id.load();
+                peers[count++] = slots[i].peer_id.load();
             }
         }
-        ctx.sync.set_direct_peers(peers.data(), count, now_ms());
-        ctx.direct_peers.store(count);
+        sync.set_direct_peers(peers.data(), count, now_ms());
+        direct_peers.store(count);
     };
 
     /** @brief 复位某个槽的会话状态（断开/超时/换入口时调用）。 */
-    const auto reset_slot = [&ctx, &peer_up, &session_generation, &handshake_sent,
+    const auto reset_slot = [this, &peer_up, &session_generation, &handshake_sent,
                              &keepalive, &publish_direct_peers](size_t slot) {
-        const uint32_t peer_id = ctx.slots[slot].peer_id.load();
+        const uint32_t peer_id = slots[slot].peer_id.load();
         if (peer_up[slot] && peer_id != 0) {
-            ctx.sync.on_peer_down(peer_id);
+            sync.on_peer_down(peer_id);
         }
         peer_up[slot] = false;
         session_generation[slot] = 0;
         handshake_sent[slot] = false;
         keepalive[slot].reset(now_ms());
-        ctx.slots[slot].peer_id.store(0);
+        slots[slot].peer_id.store(0);
         publish_direct_peers();
     };
 
-    ctx.emit(EventType::Started);  // 在控制面任务中上报，保证回调上下文一致
+    emit(EventType::Started);  // 在控制面任务中上报，保证回调上下文一致
 
-    while (!ctx.stop_requested.load()) {
+    while (!stop_requested.load()) {
         const uint32_t now = now_ms();
 
         // 1) 应用命令：物理网络就绪状态（由控制面单写 underlay_ready）。
         SmallMessage app{};
         for (size_t n = 0; n < kMaxMessagesPerLoop &&
-             xQueueReceive(ctx.q_app_cmd, &app, 0) == pdTRUE; ++n) {
+             xQueueReceive(q_app_cmd, &app, 0) == pdTRUE; ++n) {
             if (app.kind == static_cast<uint8_t>(AppCommand::UnderlayUp)) {
-                ctx.underlay_ready.store(true);
-                if (!ctx.sync.peer_up()) {
-                    ctx.state.store(State::Connecting);
+                underlay_ready.store(true);
+                if (!sync.peer_up()) {
+                    state.store(State::Connecting);
                 }
             } else {
-                ctx.underlay_ready.store(false);
+                underlay_ready.store(false);
                 for (size_t i = 0; i < kMaxConnSlots; ++i) {
                     reset_slot(i);
                 }
-                ctx.state.store(State::WaitingUnderlay);
+                state.store(State::WaitingUnderlay);
             }
         }
 
         // 2) I/O 事件：连接建立/断开。
         SmallMessage evt{};
         for (size_t n = 0; n < kMaxMessagesPerLoop &&
-             xQueueReceive(ctx.q_evt, &evt, 0) == pdTRUE; ++n) {
+             xQueueReceive(q_evt, &evt, 0) == pdTRUE; ++n) {
             const size_t slot = evt.slot < kMaxConnSlots ? evt.slot : 0;
             if (evt.kind == static_cast<uint8_t>(IoEvent::Connected)) {
                 // 新连接：复位该槽后开始握手（不影响其它槽已建立的会话）。
@@ -495,12 +501,12 @@ void Context::proto_task(void* arg) noexcept {
                 session_generation[slot] = evt.generation;
                 handshake_sent[slot] = false;
                 handshake_deadline[slot] = now + kHandshakeTimeoutMs;
-                ctx.state.store(State::Connecting);
+                state.store(State::Connecting);
                 ET_LOGI(kTag, "slot %u tcp connected (gen=%u)", static_cast<unsigned>(slot),
                         static_cast<unsigned>(evt.generation));
             } else if (session_generation[slot] == evt.generation) {
                 reset_slot(slot);
-                ctx.state.store(ctx.underlay_ready.load() ? State::Connecting
+                state.store(underlay_ready.load() ? State::Connecting
                                                           : State::WaitingUnderlay);
             }
         }
@@ -508,7 +514,7 @@ void Context::proto_task(void* arg) noexcept {
         // 3) 收到的控制帧。
         FrameMessage frame{};
         for (size_t n = 0; n < kMaxMessagesPerLoop &&
-             xQueueReceive(ctx.q_rx_ctrl, &frame, 0) == pdTRUE; ++n) {
+             xQueueReceive(q_rx_ctrl, &frame, 0) == pdTRUE; ++n) {
             // 代际全局唯一，因此可以从帧的代际反推它属于哪个连接槽。
             size_t slot = kMaxConnSlots;
             for (size_t i = 0; i < kMaxConnSlots; ++i) {
@@ -518,44 +524,44 @@ void Context::proto_task(void* arg) noexcept {
                 }
             }
             if (slot == kMaxConnSlots) {
-                ctx.dropped.fetch_add(1);  // 旧代际/未知会话的数据
+                dropped.fetch_add(1);  // 旧代际/未知会话的数据
                 continue;
             }
             PeerManagerHeader hdr{};
             if (!decode_peer_manager_header(Bytes(frame.data.data(), frame.len), hdr)) {
-                ctx.dropped.fetch_add(1);
+                dropped.fetch_add(1);
                 continue;
             }
             const bool encrypted = (hdr.flags & pm_flags::Encrypted) != 0;
             if ((hdr.flags & pm_flags::Compressed) != 0) {
                 ET_LOGE(kTag, "compressed data-plane flags are not supported");
-                ctx.set_error(ESP_ERR_NOT_SUPPORTED);
-                ctx.dropped.fetch_add(1);
+                set_error(ESP_ERR_NOT_SUPPORTED);
+                dropped.fetch_add(1);
                 continue;
             }
             // 传输长度 = PM 头 + 实际 payload（加密时再加 28 字节 AEAD 尾）。
             const size_t expected =
                 kPeerManagerHeaderSize + hdr.len + (encrypted ? kAeadTailSize : 0);
             if (frame.len != expected) {
-                ctx.dropped.fetch_add(1);
+                dropped.fetch_add(1);
                 continue;
             }
             MutBytes payload(frame.data.data() + kPeerManagerHeaderSize,
                              frame.len - kPeerManagerHeaderSize);
             // 只有发往本机（或握手的 to=0）才解密；发往其他节点的帧必须保持密文，
             // 否则转发出去的就是"加密标志 + 明文"，对端会认证失败。
-            const bool to_me = (hdr.to_peer_id == ctx.my_peer_id.load() ||
+            const bool to_me = (hdr.to_peer_id == my_peer_id.load() ||
                                 hdr.to_peer_id == 0);
             if (encrypted) {
                 if (!to_me) {
                     // 非本地目标：交给下面的 RPC 转发分支处理（不解密）。
-                } else if (!ctx.settings.enable_encryption) {
+                } else if (!settings.enable_encryption) {
                     // 关闭加密时与上游 NullCipher 一致：明文可收，已加密报文直接拒绝。
-                    ctx.dropped.fetch_add(1);
+                    dropped.fetch_add(1);
                     continue;
-                } else if (ctx.control_cipher == nullptr || !ctx.control_cipher->ready() ||
-                           !ctx.control_cipher->decrypt_in_place(payload)) {
-                    ctx.dropped.fetch_add(1);
+                } else if (control_cipher == nullptr || !control_cipher->ready() ||
+                           !control_cipher->decrypt_in_place(payload)) {
+                    dropped.fetch_add(1);
                     continue;
                 }
             }
@@ -567,12 +573,12 @@ void Context::proto_task(void* arg) noexcept {
                         validate_handshake(hdr, payload, expect, remote);
                     if (result != HandshakeResult::Ok) {
                         ET_LOGE(kTag, "handshake rejected: %d", static_cast<int>(result));
-                        ctx.set_error(ESP_ERR_INVALID_RESPONSE);
-                        request_reconnect(ctx, session_generation[slot]);
+                        set_error(ESP_ERR_INVALID_RESPONSE);
+                        request_reconnect(session_generation[slot]);
                         break;
                     }
-                    ctx.slots[slot].peer_id.store(remote);
-                    ctx.state.store(State::Syncing);
+                    slots[slot].peer_id.store(remote);
+                    state.store(State::Syncing);
                     peer_up[slot] = true;
                     keepalive[slot].reset(now);
                     last_sync_ms = 0;  // 下一轮立即发起路由同步
@@ -580,16 +586,16 @@ void Context::proto_task(void* arg) noexcept {
                     if (session_id[slot] == 0) {
                         session_id[slot] = 1;
                     }
-                    ctx.network_ready_reported = false;
-                    ctx.sync.on_peer_up(remote, session_id[slot], now);
+                    network_ready_reported = false;
+                    sync.on_peer_up(remote, session_id[slot], now);
                     publish_direct_peers();
-                    if (ctx.settings.has_static_ipv4) {
-                        sync_netif_address(ctx);  // 静态地址：握手后拉起虚拟网卡
-                    } else if (ctx.netif_created) {
-                        (void)ctx.virtual_netif.set_link(true);
+                    if (settings.has_static_ipv4) {
+                        sync_netif_address();  // 静态地址：握手后拉起虚拟网卡
+                    } else if (netif_created) {
+                        (void)virtual_netif.set_link(true);
                     }
                     ET_LOGI(kTag, "handshake ok, peer=%u", static_cast<unsigned>(remote));
-                    ctx.emit(EventType::PeerUp, remote);
+                    emit(EventType::PeerUp, remote);
                     break;
                 }
                 case PacketType::Ping: {
@@ -597,15 +603,15 @@ void Context::proto_task(void* arg) noexcept {
                     std::array<uint8_t, kPeerManagerHeaderSize + kMaxPlainPayload> pong{};
                     const size_t len = build_pong_packet(hdr, payload, pong);
                     if (len != 0) {
-                        (void)send_frame(ctx, session_generation[slot], Bytes(pong.data(), len));
+                        (void)send_frame(session_generation[slot], Bytes(pong.data(), len));
                     } else {
-                        ctx.dropped.fetch_add(1);
+                        dropped.fetch_add(1);
                     }
                     break;
                 }
                 case PacketType::Pong: {
                     if (!pong_matches(payload, keepalive[slot].last_seq())) {
-                        ctx.dropped.fetch_add(1);
+                        dropped.fetch_add(1);
                         break;
                     }
                     keepalive[slot].on_pong(now);
@@ -615,49 +621,49 @@ void Context::proto_task(void* arg) noexcept {
                 case PacketType::RpcResp: {
                     RpcPacketRef packet{};
                     if (!decode_rpc_packet(payload, packet)) {
-                        ctx.dropped.fetch_add(1);
+                        dropped.fetch_add(1);
                         break;
                     }
                     Bytes body{};
                     const RpcReassembleResult result =
-                        ctx.reassembler.feed(session_generation[slot], packet, now, body);
+                        reassembler.feed(session_generation[slot], packet, now, body);
                     if (result == RpcReassembleResult::Rejected) {
-                        ctx.set_error(ESP_ERR_INVALID_RESPONSE);
-                        ctx.dropped.fetch_add(1);
+                        set_error(ESP_ERR_INVALID_RESPONSE);
+                        dropped.fetch_add(1);
                         break;
                     }
                     if (result != RpcReassembleResult::Complete) {
                         break;  // 继续等待其余分片
                     }
                     if (packet.is_request) {
-                        if (packet.to_peer != ctx.my_peer_id.load()) {
+                        if (packet.to_peer != my_peer_id.load()) {
                             // 非本地目标的 RPC：按 overlay 路由转发，绝不当成本地调用。
                             PeerManagerHeader forwarded = hdr;
                             const uint32_t next_hop =
-                                ctx.sync.snapshot().lookup_next_hop(packet.to_peer);
+                                sync.snapshot().lookup_next_hop(packet.to_peer);
                             if (!prepare_forward(forwarded, kForwardCounterLimit) ||
                                 next_hop == kInvalidPeerId) {
-                                ctx.dropped.fetch_add(1);
+                                dropped.fetch_add(1);
                                 break;
                             }
                             encode_peer_manager_header(
                                 MutBytes(frame.data.data(), kPeerManagerHeaderSize), forwarded);
                             // 交回 I/O 任务，由它按 to_peer 选择连接槽。
                             frame.to_peer = next_hop;
-                            if (xQueueSend(ctx.q_tx, &frame, 0) != pdTRUE) {
-                                ctx.dropped.fetch_add(1);
+                            if (xQueueSend(q_tx, &frame, 0) != pdTRUE) {
+                                dropped.fetch_add(1);
                             }
                             break;
                         }
-                        handle_rpc_request(ctx, session_generation[slot], packet, body);
+                        handle_rpc_request(session_generation[slot], packet, body);
                     } else {
-                        handle_rpc_response(ctx, session_generation[slot], packet, body);
+                        handle_rpc_response(session_generation[slot], packet, body);
                     }
                     break;
                 }
                 default:
                     // 未知/不该出现在控制面的报文显式计数，而非静默忽略。
-                    ctx.dropped.fetch_add(1);
+                    dropped.fetch_add(1);
                     break;
             }
         }
@@ -668,13 +674,13 @@ void Context::proto_task(void* arg) noexcept {
                 continue;
             }
             std::array<uint8_t, kPeerManagerHeaderSize + 256> buf{};
-            const size_t len = build_handshake_packet(expect, ctx.my_peer_id.load(), buf);
+            const size_t len = build_handshake_packet(expect, my_peer_id.load(), buf);
             if (len == 0) {
-                ctx.set_error(ESP_ERR_INVALID_SIZE);
-                request_reconnect(ctx, session_generation[i]);
-            } else if (send_frame(ctx, session_generation[i], Bytes(buf.data(), len))) {
+                set_error(ESP_ERR_INVALID_SIZE);
+                request_reconnect(session_generation[i]);
+            } else if (send_frame(session_generation[i], Bytes(buf.data(), len))) {
                 handshake_sent[i] = true;
-                ctx.state.store(State::Handshaking);
+                state.store(State::Handshaking);
             }
         }
         for (size_t i = 0; i < kMaxConnSlots; ++i) {
@@ -683,11 +689,11 @@ void Context::proto_task(void* arg) noexcept {
                 continue;
             }
             ET_LOGW(kTag, "slot %u handshake timeout", static_cast<unsigned>(i));
-            ctx.set_error(ESP_ERR_TIMEOUT);
-            request_reconnect(ctx, session_generation[i]);
+            set_error(ESP_ERR_TIMEOUT);
+            request_reconnect(session_generation[i]);
             handshake_sent[i] = false;
             session_generation[i] = 0;
-            ctx.state.store(State::Connecting);
+            state.store(State::Connecting);
         }
 
         // 5) 逐槽保活：发送间隔 1/2/4/8/16/32 秒，响应超时固定 2 秒，
@@ -700,67 +706,67 @@ void Context::proto_task(void* arg) noexcept {
             const KeepaliveAction action = keepalive[i].tick(now);
             if (action == KeepaliveAction::SendPing) {
                 std::array<uint8_t, kPeerManagerHeaderSize + 4> ping{};
-                const size_t len = build_ping_packet(ctx.my_peer_id.load(),
-                                                     ctx.slots[i].peer_id.load(),
+                const size_t len = build_ping_packet(my_peer_id.load(),
+                                                     slots[i].peer_id.load(),
                                                      keepalive[i].last_seq(), ping);
                 if (len != 0) {
-                    (void)send_frame(ctx, session_generation[i], Bytes(ping.data(), len));
+                    (void)send_frame(session_generation[i], Bytes(ping.data(), len));
                 }
             } else if (action == KeepaliveAction::Close) {
                 ET_LOGW(kTag, "slot %u lost %u ping responses, closing connection",
                         static_cast<unsigned>(i),
                         static_cast<unsigned>(Keepalive::kMaxConsecutiveFailures));
-                ctx.set_error(ESP_ERR_TIMEOUT);
-                request_reconnect(ctx, session_generation[i]);
+                set_error(ESP_ERR_TIMEOUT);
+                request_reconnect(session_generation[i]);
             }
         }
 
         // 6) 路由同步（双向主动，向**每个**已握手对端各发一次）。
         const bool sync_due = elapsed_ms(now, last_sync_ms) >= kRouteSyncIntervalMs;
-        const bool reverse_due = !sync_due && ctx.sync.topology().dirty() &&
+        const bool reverse_due = !sync_due && sync.topology().dirty() &&
                                  elapsed_ms(now, last_sync_ms) >= kMinReverseSyncMs;
         if (sync_due || reverse_due) {
             for (size_t i = 0; i < kMaxConnSlots; ++i) {
                 if (!peer_up[i] || session_generation[i] == 0) {
                     continue;
                 }
-                (void)send_sync_request(ctx, session_generation[i], ctx.slots[i].peer_id.load(),
+                (void)send_sync_request(session_generation[i], slots[i].peer_id.load(),
                                         /*include_topology=*/true, now);
             }
             last_sync_ms = now;
         }
 
         // 6b) 拓扑变化 → 重算路由并发布快照；可达即上报 Ready。
-        if (ctx.sync.recompute_if_dirty()) {
+        if (sync.recompute_if_dirty()) {
             // dhcp 自分配：拓扑变化可能带来新地址或新子网（会再次改动快照）。
-            if (ctx.sync.dhcp_enabled() && ctx.sync.peer_up() &&
-                ctx.sync.update_dhcp(now, random_u32())) {
-                sync_netif_address(ctx);
+            if (sync.dhcp_enabled() && sync.peer_up() &&
+                sync.update_dhcp(now, random_u32())) {
+                sync_netif_address();
                 last_sync_ms = 0;  // 地址变了：立即重新通告
-                (void)ctx.sync.recompute_if_dirty();
+                (void)sync.recompute_if_dirty();
             }
-            const RouteSnapshot& snapshot = ctx.sync.snapshot();
-            ctx.reachable_routes.store(snapshot.reachable_count());
+            const RouteSnapshot& snapshot = sync.snapshot();
+            reachable_routes.store(snapshot.reachable_count());
             // 长度 1 邮箱：按值覆盖，数据面取自己的副本。
-            (void)xQueueOverwrite(ctx.q_snapshot, &snapshot);
+            (void)xQueueOverwrite(q_snapshot, &snapshot);
             const size_t reachable = snapshot.reachable_count();
-            const bool address_ready = ctx.netif_created && ctx.my_ipv4.load() != 0;
-            if (reachable != 0 && address_ready && !ctx.network_ready_reported && ctx.sync.peer_up()) {
-                ctx.state.store(State::Ready);
-                ctx.network_ready_reported = true;
+            const bool address_ready = netif_created && my_ipv4.load() != 0;
+            if (reachable != 0 && address_ready && !network_ready_reported && sync.peer_up()) {
+                state.store(State::Ready);
+                network_ready_reported = true;
                 ET_LOGI(kTag, "network ready: %u reachable peer(s)",
                         static_cast<unsigned>(reachable));
-                ctx.emit(EventType::NetworkReady);
-            } else if (reachable == 0 && ctx.network_ready_reported) {
-                ctx.network_ready_reported = false;
-                ctx.state.store(State::Syncing);
+                emit(EventType::NetworkReady);
+            } else if (reachable == 0 && network_ready_reported) {
+                network_ready_reported = false;
+                state.store(State::Syncing);
             }
         }
 
         // 7) 超时回收（事务、不完整的分片重组与过期拓扑）。
-        ctx.transactions.expire(now);
-        ctx.reassembler.expire(now);
-        ctx.sync.expire_topology(now);
+        transactions.expire(now);
+        reassembler.expire(now);
+        sync.expire_topology(now);
 
         vTaskDelay(kLoopDelayTicks);
     }
@@ -768,9 +774,9 @@ void Context::proto_task(void* arg) noexcept {
     for (size_t i = 0; i < kMaxConnSlots; ++i) {
         reset_slot(i);
     }
-    ctx.state.store(State::Stopped);
-    ctx.emit(EventType::Stopped);
-    (void)xSemaphoreGive(ctx.task_exit);
+    state.store(State::Stopped);
+    emit(EventType::Stopped);
+    (void)xSemaphoreGive(task_exit);
 }
 
 }  // namespace et

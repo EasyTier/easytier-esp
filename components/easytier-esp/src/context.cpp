@@ -253,19 +253,19 @@ esp_err_t Context::create_runtime() noexcept {
         }
     }
 
-    if (xTaskCreate(&Context::io_task, "et_io", kIoTaskStack, this, kIoTaskPriority,
+    if (xTaskCreate(&Context::io_entry, "et_io", kIoTaskStack, this, kIoTaskPriority,
                     nullptr) != pdPASS) {
         ET_LOGE(kTag, "cannot create et_io task (stack %u bytes)", kIoTaskStack);
         return ESP_ERR_NO_MEM;
     }
-    if (xTaskCreate(&Context::proto_task, "et_proto", kProtoTaskStack, this, kProtoTaskPriority,
+    if (xTaskCreate(&Context::proto_entry, "et_proto", kProtoTaskStack, this, kProtoTaskPriority,
                     nullptr) != pdPASS) {
         ET_LOGE(kTag, "cannot create et_proto task (stack %u bytes)", kProtoTaskStack);
         stop_requested.store(true);
         (void)xSemaphoreTake(task_exit, pdMS_TO_TICKS(1000));
         return ESP_ERR_NO_MEM;
     }
-    if (xTaskCreate(&Context::data_task, "et_data", kDataTaskStack, this, kDataTaskPriority,
+    if (xTaskCreate(&Context::data_entry, "et_data", kDataTaskStack, this, kDataTaskPriority,
                     nullptr) != pdPASS) {
         ET_LOGE(kTag, "cannot create et_data task (stack %u bytes)", kDataTaskStack);
         stop_requested.store(true);
