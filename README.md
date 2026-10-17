@@ -1,34 +1,27 @@
-# easytier-esp
+# EasyTier-ESP
 
-把 ESP32 接入既有 EasyTier 虚拟网络的 ESP-IDF 组件（C++20）。组件只实现 EasyTier
-客户端侧的协议与数据面，WiFi、文件系统、业务 socket 等由应用负责。
+EasyTier-ESP 是一个使用 C++ 20 编写的 EasyTier 异地组网工具的轻量级协议实现。便于把 ESP32 接入既有 EasyTier 虚拟网络。组件目前实现 EasyTier客户端侧的基本协议与数据面。
 
 - 组件注册表 ID：`myqfeng/easytier-esp`（ESP-IDF Component Registry）
-- 适配 ESP-IDF：6.1.x（`idf_component.yml` 要求 `>=6.1`）
-- 当前验证目标：ESP32-S3
-- 公开头文件：`components/easytier-esp/include/easytier-esp.hpp`
+- 适配 ESP-IDF：>=6.1
+- 当前已验证目标：ESP32-S3-N16R8
 
-## 项目简介
+## 项目特点
 
 - **协议兼容**：TCP 入口连接、PeerManagerHeader 分帧、非安全模式握手（网络名 +
   SipHash 摘要 + peer id 冲突校验）、Ping/Pong 保活、RPC 分片/乱序重组/事务匹配、
   OSPF 式路由同步（`RoutePeerInfo` / 邻接表 / 邻接位图）。
-- **加解密**：AES-128-GCM（PSA Crypto），控制面与数据面各持独立的 AEAD 实例；
-  密钥由 SipHash-1-3 从 `network_secret` 派生。
-- **数据面**：lwIP raw L3 虚拟网卡（不设 ARP/以太网标志，不与物理网段重叠）、
-  中继转发（保持密文，只改 PM 头）。
+- **加解密**：支持 EasyTier 默认的 AES-128-GCM（PSA Crypto）加密xieyi。
+- **数据面**：lwIP raw L3 虚拟网卡、中继转发。
 - **有界资源**：三个任务（`io` / `proto` / `data`）、固定容量队列与缓冲；
   队列深度、任务栈/优先级、并发连接槽数都可在 Kconfig 调整。
 - **公开 API 只有一个类 `et::Inst`**（RAII）：TOML 构造 → `start()` →
-  `connect()` / `disconnect()` → `stop()` / 析构。**允许多个实例并存**，组件内部
-  没有全局实例状态。
-- **TOML 是唯一配置入口**：构造函数直接接收 TOML 文本，不提供编程式 setter；
-  设置项构造后不可修改，`get_config_info()` 返回 `Settings` 副本（网络密钥已抹除）。
+  `connect()` / `disconnect()` → `stop()` / 析构。
 
 ## 代码层级结构
 
 ```
-easytier-esp32/
+easytier-esp/
 ├── components/easytier-esp/          # 组件本体（可被 IDF 组件管理器安装）
 │   ├── include/easytier-esp.hpp      # 唯一公开头：Inst / Settings / Status / Event
 │   ├── src/
@@ -179,5 +172,4 @@ enable_encryption = true
 - `http_control.{hpp,cpp}`：演示用 HTTP 服务（GPIO38 电平翻转），与组网无关。
 
 示例依赖 `easytier-esp` 组件与 `esp_wifi`/`esp_event`/`esp_netif`/`esp_timer`/
-`nvs_flash` 等；仓库不包含 `main/easytier.toml`（含真实入口与网络密钥，已 gitignore），
-新克隆的仓库需要自行创建配置后再构建。
+`nvs_flash` 等；仓库不包含 `main/easytier.toml`，新克隆的仓库需要自行创建配置后再构建。

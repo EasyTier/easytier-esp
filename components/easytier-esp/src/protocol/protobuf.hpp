@@ -21,12 +21,9 @@
 #include <span>
 #include <string_view>
 
-namespace et {
+#include "support/bytes.hpp"
 
-/** @brief 只读字节视图。 */
-using Bytes = std::span<const uint8_t>;
-/** @brief 可写字节视图。 */
-using MutBytes = std::span<uint8_t>;
+namespace et {
 
 /** @brief protobuf 线型。 */
 enum class PbWireType : uint8_t {
