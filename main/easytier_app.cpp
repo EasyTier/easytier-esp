@@ -4,6 +4,7 @@
  */
 #include "easytier_app.hpp"
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
@@ -80,8 +81,13 @@ void on_easytier_event(const et::Event& event, void*) noexcept {
     }
 }
 
-/// 配置诊断快照：实测 3480 B，放静态区避免占用任务栈。
-et::ConfigInfo g_config_info;
+/** @brief 把 16 字节 UUID 格式化成 36 字符文本（8-4-4-4-12）。 */
+void format_uuid(const std::array<uint8_t, 16>& id, std::array<char, 37>& out) {
+    (void)snprintf(out.data(), out.size(),
+                   "%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x",
+                   id[0], id[1], id[2], id[3], id[4], id[5], id[6], id[7], id[8], id[9], id[10],
+                   id[11], id[12], id[13], id[14], id[15]);
+}
 
 /** @brief 状态名（日志用）。 */
 const char* state_name(et::State state) {
@@ -130,44 +136,41 @@ void log_status() {
              static_cast<int>(status.last_error));
 }
 
-/** @brief 打印实际生效的配置（TOML 的映射结果）。 */
+/** @brief 打印实际生效的配置（TOML 的映射结果 + 身份补齐）。 */
 void log_effective_config() {
     if (!g_inst.has_value()) {
         return;
     }
-    if (g_inst->get_config_info(g_config_info) != ESP_OK) {
-        return;
-    }
+    const et::Settings cfg = g_inst->get_config_info();
+    std::array<char, 37> uuid{};
+    format_uuid(cfg.instance_id, uuid);
     ESP_LOGI(kTag, "config: instance=%s hostname=%s network=%s instance_id=%s",
-             g_config_info.instance_name.data(), g_config_info.hostname.data(),
-             g_config_info.network_name.data(), g_config_info.instance_id.data());
-    for (size_t i = 0; i < g_config_info.peer_count; ++i) {
-        ESP_LOGI(kTag, "config: peer[%u]=%s", static_cast<unsigned>(i),
-                 g_config_info.peers[i].text.data());
+             cfg.instance_name.c_str(), cfg.hostname.c_str(), cfg.network_name.c_str(),
+             uuid.data());
+    for (size_t i = 0; i < cfg.peers.size(); ++i) {
+        ESP_LOGI(kTag, "config: peer[%u]=%s:%u", static_cast<unsigned>(i),
+                 cfg.peers[i].host.c_str(), static_cast<unsigned>(cfg.peers[i].port));
     }
-    if (g_config_info.peers_truncated) {
-        // 入口条目数没有上限，但诊断快照只保留前几条，这里明确提示总数。
-        ESP_LOGW(kTag, "config: %u entry peers configured, only the first %u are shown",
-                 static_cast<unsigned>(g_config_info.peer_total_count),
-                 static_cast<unsigned>(g_config_info.peer_count));
-    }
-    if (g_config_info.has_static_ipv4) {
+    if (cfg.has_static_ipv4) {
         ESP_LOGI(kTag, "config: ipv4=%u.%u.%u.%u/%u mtu=%u",
-                 static_cast<unsigned>((g_config_info.static_ipv4 >> 24) & 0xFF),
-                 static_cast<unsigned>((g_config_info.static_ipv4 >> 16) & 0xFF),
-                 static_cast<unsigned>((g_config_info.static_ipv4 >> 8) & 0xFF),
-                 static_cast<unsigned>(g_config_info.static_ipv4 & 0xFF),
-                 static_cast<unsigned>(g_config_info.static_prefix),
-                 static_cast<unsigned>(g_config_info.mtu));
-    } else if (g_config_info.dhcp) {
-        ESP_LOGI(kTag, "config: dhcp=%s mtu=%u", g_config_info.dhcp_subnet.data(),
-                 static_cast<unsigned>(g_config_info.mtu));
+                 static_cast<unsigned>((cfg.static_ipv4 >> 24) & 0xFF),
+                 static_cast<unsigned>((cfg.static_ipv4 >> 16) & 0xFF),
+                 static_cast<unsigned>((cfg.static_ipv4 >> 8) & 0xFF),
+                 static_cast<unsigned>(cfg.static_ipv4 & 0xFF),
+                 static_cast<unsigned>(cfg.static_prefix), static_cast<unsigned>(cfg.mtu));
+    } else if (cfg.dhcp) {
+        const uint32_t subnet = cfg.dhcp_subnet;
+        ESP_LOGI(kTag, "config: dhcp=%u.%u.%u.%u/%u mtu=%u",
+                 static_cast<unsigned>((subnet >> 24) & 0xFF),
+                 static_cast<unsigned>((subnet >> 16) & 0xFF),
+                 static_cast<unsigned>((subnet >> 8) & 0xFF),
+                 static_cast<unsigned>(subnet & 0xFF),
+                 static_cast<unsigned>(cfg.dhcp_prefix), static_cast<unsigned>(cfg.mtu));
     } else {
         ESP_LOGW(kTag, "config: 既没有静态 ipv4 也没有启用 dhcp，虚拟网卡不会创建");
     }
     // 加密开关直接影响能否与对端互通，单独打印一行便于上板核对。
-    ESP_LOGI(kTag, "config: encryption=%s",
-             g_config_info.enable_encryption ? "aes-gcm" : "disabled");
+    ESP_LOGI(kTag, "config: encryption=%s", cfg.enable_encryption ? "aes-gcm" : "disabled");
 }
 
 /**

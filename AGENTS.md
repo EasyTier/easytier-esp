@@ -9,7 +9,7 @@
 
 ## 项目定位与目录
 
-本项目把 ESP32 接入既有 EasyTier 网络，组件只适配 **ESP-IDF 6.1.x**，当前目标为 ESP32-S3。C++20，命名空间 `et`。**公开 API 只有一个类 `et::Inst`**（RAII）：构造函数直接接收 TOML 文本，内部完成解析、身份补齐、结构校验与资源分配（上下文、队列、任务、socket、虚拟网卡），析构自动停止并释放。**没有独立的配置类**：全部设置项是实例的私有实现（`src/config/settings.hpp` 的内部 `Settings`，用 `std::string`/`std::vector`），构造后不可修改，只能通过 `get_config_info()` 读生效配置快照。**解析诊断不缓存**：真正失败（支持的字段类型/取值错误、peer 非法、语法/资源超限）用 Error 日志直接输出，接口只返回错误码；不支持的字段不解析也不报错。**允许多个 `et::Inst` 并存**，组件内部不得引入文件级实例状态；**不要引入 C 包装层或 `Node` 层**。配置**只走 TOML**：不要加编程式 setter；每次构造都是“缺省值 + TOML”的全量替换，因此未显式给出的 `instance_id`/`hostname`/`instance_name` 每次都会重新生成。组件禁用异常与 RTTI，构造不能返回错误码，失败用 `valid()`/`last_error()` 查询；设置文本用 `std::string`，分配失败会终止进程（不再有字段级 `ESP_ERR_NO_MEM`）。
+本项目把 ESP32 接入既有 EasyTier 网络，组件只适配 **ESP-IDF 6.1.x**，当前目标为 ESP32-S3。C++20，命名空间 `et`。**公开 API 只有一个类 `et::Inst`**（RAII）：构造函数直接接收 TOML 文本，内部完成解析、身份补齐、结构校验与资源分配（上下文、队列、任务、socket、虚拟网卡），析构自动停止并释放。**没有配置类**：全部设置项仍是实例的私有实现（`et::Settings` 数据体定义在公开头，但只能由 TOML 构造，用 `std::string`/`std::vector`），构造后不可修改；`get_config_info()` 返回一份 `Settings` 深拷贝（`network_secret` 恒为空）。**解析诊断不缓存**：真正失败（支持的字段类型/取值错误、peer 非法、语法/资源超限）用 Error 日志直接输出，接口只返回错误码；不支持的字段不解析也不报错。**允许多个 `et::Inst` 并存**，组件内部不得引入文件级实例状态；**不要引入 C 包装层或 `Node` 层**。配置**只走 TOML**：不要加编程式 setter；每次构造都是“缺省值 + TOML”的全量替换，因此未显式给出的 `instance_id`/`hostname`/`instance_name` 每次都会重新生成。组件禁用异常与 RTTI，构造不能返回错误码，失败用 `valid()`/`last_error()` 查询；设置文本用 `std::string`，分配失败会终止进程（不再有字段级 `ESP_ERR_NO_MEM`）。
 
 - `components/easytier-esp/include/easytier-esp.h`：公开 C++ API、配置、状态、事件和诊断。
 - `components/easytier-esp/src/`：组件实现；`config/`、`crypto/`、`protocol/`、`transport/`、`peer/`、`rpc/`、`route/`、`netif/`、`data/`、`tasks/` 为主要模块。

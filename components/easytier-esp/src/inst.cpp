@@ -9,17 +9,11 @@
  * stop()              → 委托 Context 置停止标志并等待任务退出
  * ~Inst()             → 释放 Context（其析构函数负责停任务、释放资源、清零密钥）
  * @endcode
- * 组件内**没有**全局单实例状态：每个 Inst 独占自己的 Settings 与 Context，因此可以
- * 同时存在多个实例（内存与任务数按实例叠加）。
  */
-#include <array>
-#include <cstdio>
 #include <new>
-#include <string_view>
 
 #include "context.h"
 #include "config/config.hpp"
-#include "config/settings.hpp"
 #include "config/toml.hpp"
 #include "support/log.hpp"
 
@@ -27,16 +21,6 @@ namespace et {
 namespace {
 
 constexpr const char* kTag = "ET.INSTANCE";
-
-/** @brief 把文本视图拷进定长快照缓冲（截断但保证 NUL 结尾）。 */
-template <size_t N>
-void copy_text(std::array<char, N>& dst, std::string_view src) noexcept {
-    const size_t n = src.size() < N - 1 ? src.size() : N - 1;
-    for (size_t i = 0; i < n; ++i) {
-        dst[i] = src[i];
-    }
-    dst[n] = '\0';
-}
 
 /**
  * @brief 离开作用域时清除局部 @ref Settings 副本里的网络密钥。
@@ -61,7 +45,7 @@ Inst::Inst(std::string_view toml, const RuntimeOptions& options) noexcept {
     const SettingsSecretGuard secret_guard{settings};
     last_error_ = parse_toml_into(settings, toml);
     // 即使解析失败也补齐身份，保证错误信息里能看到实例名/hostname。
-    settings.finalize_identity();
+    finalize_identity(settings);
     if (last_error_ != ESP_OK) {
         ET_LOGE(kTag, "TOML parse failed: 0x%x", last_error_);
         return;
@@ -117,42 +101,15 @@ esp_err_t Inst::get_status(Status& out) const noexcept {
     return ESP_OK;
 }
 
-esp_err_t Inst::get_config_info(ConfigInfo& out) const noexcept {
+Settings Inst::get_config_info() const noexcept {
+    Settings cfg{};
     if (ctx_ == nullptr) {
-        return ESP_ERR_INVALID_STATE;
+        return cfg;  // 构造失败：返回缺省设置，调用方仍可用 valid() 判断
     }
-    // 友元读取 Context 里不可变的设置，生成定长快照（不含网络密钥）。
-    const Settings& cfg = ctx_->settings;
-    out = ConfigInfo{};
-    copy_text(out.instance_name, cfg.instance_name);
-    copy_text(out.hostname, cfg.hostname);
-    copy_text(out.network_name, cfg.network_name);
-    format_uuid_text(cfg.instance_id.data(), out.instance_id.data());
-    out.peer_total_count = cfg.peers.size();
-    out.peer_count = cfg.peers.size() > out.peers.size() ? out.peers.size() : cfg.peers.size();
-    out.peers_truncated = cfg.peers.size() > out.peer_count;
-    for (size_t i = 0; i < out.peer_count; ++i) {
-        // 主机名最长 255 字节而缓冲 200：用精度限长，避免编译期截断告警。
-        (void)snprintf(out.peers[i].text.data(), out.peers[i].text.size(), "%.180s:%u",
-                       cfg.peers[i].host.c_str(), static_cast<unsigned>(cfg.peers[i].port));
-    }
-    out.has_static_ipv4 = cfg.has_static_ipv4;
-    out.static_ipv4 = cfg.static_ipv4;
-    out.static_prefix = cfg.static_prefix;
-    out.dhcp = cfg.dhcp;
-    if (cfg.dhcp) {
-        const uint32_t subnet = cfg.dhcp_subnet_or_default();
-        (void)snprintf(out.dhcp_subnet.data(), out.dhcp_subnet.size(), "%u.%u.%u.%u/%u",
-                       static_cast<unsigned>((subnet >> 24) & 0xFF),
-                       static_cast<unsigned>((subnet >> 16) & 0xFF),
-                       static_cast<unsigned>((subnet >> 8) & 0xFF),
-                       static_cast<unsigned>(subnet & 0xFF),
-                       static_cast<unsigned>(cfg.dhcp_has_subnet ? cfg.dhcp_prefix
-                                                                 : kDefaultDhcpPrefix));
-    }
-    out.enable_encryption = cfg.enable_encryption;
-    out.mtu = cfg.mtu;
-    return ESP_OK;
+    cfg = ctx_->settings;
+    // 网络密钥只用于组件内部派生密钥，绝不随快照外泄。
+    zeroize_string(cfg.network_secret);
+    return cfg;
 }
 
 esp_err_t Inst::stop(uint32_t timeout_ms) noexcept {

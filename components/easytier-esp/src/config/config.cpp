@@ -77,19 +77,19 @@ constexpr const char* kTag = "ET.CONFIG";
  * @details 与用户约定一致：hostname 缺省回退 Espressif；instance_name 未显式配置时取
  *          hostname；instance_id 缺省生成随机 UUID v4（显式 UUID 含全零都保留）。
  */
-void Settings::finalize_identity() noexcept {
-    if (hostname.empty()) {
-        hostname = std::string(kDefaultHostname);
+void finalize_identity(Settings& settings) noexcept {
+    if (settings.hostname.empty()) {
+        settings.hostname = std::string(kDefaultHostname);
     }
-    if (!instance_name_explicit) {
-        instance_name = hostname;
+    if (!settings.instance_name_explicit) {
+        settings.instance_name = settings.hostname;
     }
-    if (!has_instance_id) {
-        fill_random(instance_id);
+    if (!settings.has_instance_id) {
+        fill_random(settings.instance_id);
         // RFC 4122：版本位固定为 4，变体位固定为 10xx。
-        instance_id[6] = static_cast<uint8_t>((instance_id[6] & 0x0f) | 0x40);
-        instance_id[8] = static_cast<uint8_t>((instance_id[8] & 0x3f) | 0x80);
-        has_instance_id = true;
+        settings.instance_id[6] = static_cast<uint8_t>((settings.instance_id[6] & 0x0f) | 0x40);
+        settings.instance_id[8] = static_cast<uint8_t>((settings.instance_id[8] & 0x3f) | 0x80);
+        settings.has_instance_id = true;
     }
 }
 

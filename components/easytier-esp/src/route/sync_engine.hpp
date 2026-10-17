@@ -16,8 +16,9 @@
 #include <cstddef>
 #include <cstdint>
 #include <span>
+#include <string>
 
-#include "config/settings.hpp"
+#include "easytier-esp.h"
 #include "protocol/messages.hpp"
 #include "route/dhcp.hpp"
 #include "route/route_info.hpp"

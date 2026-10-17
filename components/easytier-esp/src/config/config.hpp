@@ -14,10 +14,19 @@
 #include <string>
 #include <string_view>
 
-#include "config/settings.hpp"
 #include "easytier-esp.h"
 
 namespace et {
+
+/**
+ * @brief 补齐实例身份（每次构造 Inst 解析完 TOML 后调用）。
+ * @details hostname 为空回退 @ref kDefaultHostname ；instance_name 未显式配置时取
+ *          hostname；instance_id 未配置时生成随机 UUID v4（显式 UUID 含全零都保留）。
+ */
+void finalize_identity(Settings& settings) noexcept;
+
+/** @brief 用 0 覆写字符串内容再释放容量（用于清除网络密钥等敏感文本）。 */
+void zeroize_string(std::string& text) noexcept;
 
 /**
  * @brief 严格解析受支持的 TCP/IPv4 或 DNS 入口（TOML 是唯一配置入口）。

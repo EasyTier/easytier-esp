@@ -16,6 +16,7 @@
 
 #include <new>
 
+#include "config/config.hpp"
 #include "crypto/kdf.hpp"
 #include "support/config_limits.hpp"
 #include "support/log.hpp"

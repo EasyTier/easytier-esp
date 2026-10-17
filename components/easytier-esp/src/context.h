@@ -20,7 +20,6 @@
 
 #include "easytier-esp.h"
 #include "config/config.hpp"
-#include "config/settings.hpp"
 #include "support/config_limits.hpp"
 #include "crypto/aes_gcm.hpp"
 #include "protocol/wire.hpp"

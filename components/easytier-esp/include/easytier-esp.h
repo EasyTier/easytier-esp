@@ -6,8 +6,8 @@
  * - 公开接口仅提供 C++20 API，不提供 C 包装层；内部实现位于 @c namespace et。
  * - **只有一个公开类 @ref et::Inst**：用 TOML 文本构造即完成全部设置（组件**不接受
  *   文件路径**，应用自己读取文件后把文本交给构造函数），析构即停止任务并释放资源。
- * - 没有独立的配置类：全部设置项都是 @ref et::Inst 的私有实现细节，应用只能在构造后
- *   通过 @ref et::Inst::get_config_info 读取生效配置快照。
+ * - 没有配置类：设置项仍由 TOML 全量构造，应用只能在构造后通过
+ *   @ref et::Inst::get_config_info 取一份 @ref Settings 副本（网络密钥字段已抹除）。
  * - **允许多个实例并存**（组件内部没有全局单实例状态）。
  * - 配置格式与上游 EasyTier 核心保持一致（TOML）：无法采用的非 peer 字段用 Warn 日志
  *   说明并忽略；解析失败用 Error 日志说明并通过 @ref et::Inst::last_error 返回错误码
@@ -21,7 +21,9 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <string>
 #include <string_view>
+#include <vector>
 
 #include "esp_err.h"
 
@@ -46,47 +48,52 @@ inline constexpr std::string_view kDefaultHostname = "Espressif";
 /** @brief 未配置 network_name 时的网络名。 */
 inline constexpr std::string_view kDefaultNetworkName = "default";
 
+/** @brief 一个已解析的入口地址（来自 TOML 的 `[[peer]].uri`）。 */
+struct PeerEndpoint {
+    std::string host{};  ///< 主机名或点分 IPv4 文本
+    uint16_t port = 0;   ///< 端口
+};
+
 /**
- * @brief @ref ConfigInfo 能快照的入口数量上限（仅影响诊断输出，不影响实际配置）。
- * @note 实际入口数量没有上限；超过该数量时 @ref ConfigInfo::peers_truncated 为 true，
- *       完整数量见 @ref ConfigInfo::peer_total_count 。
+ * @brief 实例的生效设置（@ref et::Inst::get_config_info 返回的副本）。
+ *
+ * @details 字段与组件内部的设置模型一致：构造 `et::Inst` 时由 TOML 覆盖缺省值，
+ *          再补齐身份（hostname 回退、instance_name 推导、随机 UUID v4）。
+ *          @ref network_secret 是组件内部派生密钥用的字段：**对外返回的副本里
+ *          始终为空**，应用拿不到真实网络密钥。
+ *
+ * @note 入口列表与文本字段都是 `std::string` / `std::vector`，长度没有固定上限；
+ *       返回的是深拷贝，可以安全地跨任务保存与打印。
  */
-inline constexpr size_t kConfigInfoMaxPeers = 16;
+struct Settings {
+    std::string instance_name{};                    ///< 实例名（缺省取 hostname）
+    std::string hostname{};                         ///< 主机名（缺省 Espressif，规范化后最多 32 码点）
+    std::array<uint8_t, 16> instance_id{};          ///< 实例 UUID 字节
+    bool has_instance_id = false;                   ///< 是否已确定 UUID（显式或用例 v4）
+    bool instance_name_explicit = false;            ///< instance_name 是否由 TOML 显式给出
+
+    std::string network_name{std::string(kDefaultNetworkName)};  ///< 网络名
+    std::string network_secret{};                   ///< 网络密钥（**对外返回的副本恒为空**）
+
+    std::vector<PeerEndpoint> peers{};              ///< 入口地址列表（条数无固定上限）
+
+    bool has_static_ipv4 = false;                   ///< 是否配置了静态虚拟 IPv4
+    uint32_t static_ipv4 = 0;                       ///< 静态虚拟 IPv4（数值表示）
+    uint8_t static_prefix = 24;                     ///< 静态前缀长度
+
+    bool dhcp = false;                              ///< 是否启用虚拟地址自分配
+    bool dhcp_has_subnet = false;                   ///< 是否显式配置了 dhcp 子网
+    uint32_t dhcp_subnet = kDefaultDhcpSubnet;      ///< dhcp 子网网络号
+    uint8_t dhcp_prefix = kDefaultDhcpPrefix;       ///< dhcp 子网前缀长度
+
+    /** @brief 是否对数据与 RPC 报文做 AES-128-GCM 加密（上游 `flags.enable_encryption`）。 */
+    bool enable_encryption = true;
+    uint16_t mtu = kDefaultMtu;                     ///< 虚拟网卡 MTU，取值 576..1380
+};
 
 // ---------------------------------------------------------------------------
 // 运行期状态与事件
 // ---------------------------------------------------------------------------
-
-/**
- * @brief 当前生效配置的诊断快照。
- *
- * @details 用固定缓冲区承载，不引用组件内部对象，可以安全地跨任务拷贝与打印——
- *          联调时"实际生效的配置到底是什么"往往是最关键的信息。入口数量本身没有
- *          上限，本结构只快照前 @ref kConfigInfoMaxPeers 条，因此额外提供
- *          @ref peer_total_count 与 @ref peers_truncated 。
- */
-struct ConfigInfo {
-    /** @brief 一个入口地址（已格式化为 host:port）。 */
-    struct Peer {
-        std::array<char, 200> text{};  ///< "host:port"
-    };
-
-    std::array<char, 64> instance_name{};  ///< 实例名
-    std::array<char, 64> hostname{};       ///< 主机名（可能为空）
-    std::array<char, 64> network_name{};   ///< 网络名
-    std::array<char, 37> instance_id{};    ///< 实例 UUID 文本
-    std::array<Peer, kConfigInfoMaxPeers> peers{};  ///< 入口列表（最多 kConfigInfoMaxPeers 条）
-    size_t peer_count = 0;         ///< @ref peers 中已填充的条数
-    size_t peer_total_count = 0;   ///< 实际配置的入口总条数（可能大于 peer_count）
-    bool peers_truncated = false;  ///< 入口总条数是否超过 @ref peers 的容量
-    bool has_static_ipv4 = false;          ///< 是否配置了静态虚拟 IPv4
-    uint32_t static_ipv4 = 0;              ///< 静态虚拟 IPv4（数值表示）
-    uint8_t static_prefix = 24;            ///< 静态前缀长度
-    bool dhcp = false;                     ///< 是否启用虚拟地址自分配
-    std::array<char, 24> dhcp_subnet{};    ///< dhcp 子网文本（"10.126.126.0/24"）
-    bool enable_encryption = true;         ///< 数据与 RPC 报文是否加密
-    uint16_t mtu = kDefaultMtu;            ///< 虚拟网卡 MTU
-};
 
 /**
  * @brief 实例生命周期状态。
@@ -182,8 +189,8 @@ class Context;
  * - **构造即初始化**：解析 TOML 文本、补齐实例身份、校验结构、在堆上分配运行上下文并
  *   派生密钥（不创建任务）。TOML 是唯一配置入口，应用自己读取文件后把文本交给构造函数；
  * - **析构即释放**：若已 @ref start 则先做无限等待的停止，再释放队列/连接/AEAD 并清零密钥；
- * - **设置项没有独立的配置类**：全部字段是实例的私有实现细节，构造后不可修改；应用只能
- *   通过 @ref get_config_info 读取生效配置快照；
+ * - **设置项只由 TOML 提供**：构造后不可修改；应用可用 @ref get_config_info 取一份
+ *   @ref Settings 副本（网络密钥字段已抹除），不能反向修改实例的设置；
  * - **允许多个实例并存**：组件内部没有全局单实例状态，每个对象独占自己的上下文、队列、
  *   任务、socket、虚拟网卡与事件回调。常驻内存、任务与连接槽按实例数量叠加，多实例时
  *   应用需自行避免虚拟 IP/网段冲突；
@@ -214,7 +221,7 @@ class Context;
  *
  * | 接口 | 可从任意任务调用 | 允许在事件回调中调用 | 说明 |
  * | --- | --- | --- | --- |
- * | @ref get_status / @ref get_config_info / @ref last_error | 是 | 是 | 只读原子量与不可变数据，返回副本 |
+ * | @ref get_status / @ref get_config_info / @ref last_error | 是 | 是 | 只读原子量 / 深拷贝设置，返回值与实例无共享 |
  * | @ref set_underlay_ready | 是 | 是 | 非阻塞（队列投递），物理网络事件里直接调用 |
  * | 构造 | 仅初始化阶段（大栈任务） | 否 | 会解析 TOML 并分配上下文 |
  * | @ref start / @ref stop / 析构 | 同一任务串行 | **否** | 会等待任务，见下方死锁说明 |
@@ -295,10 +302,13 @@ public:
     esp_err_t get_status(Status& out) const noexcept;
 
     /**
-     * @brief 取回当前生效配置的诊断快照（仅用于日志/诊断）。
-     * @return 构造失败时返回 @c ESP_ERR_INVALID_STATE
+     * @brief 取回当前生效设置的一份副本。
+     * @details 字段来自构造时的 TOML 覆盖 + 身份补齐（随机 UUID、hostname 回退、
+     *          IPv4 归一化等），因此不等同于 TOML 原文。返回的 @ref Settings 副本里
+     *          @ref Settings::network_secret 已被抹除（恒为空串），可以安全打印。
+     * @return 生效设置深拷贝；构造失败时返回缺省构造的 @ref Settings
      */
-    esp_err_t get_config_info(ConfigInfo& out) const noexcept;
+    [[nodiscard]] Settings get_config_info() const noexcept;
 
     /**
      * @brief 停止实例（幂等）。

@@ -113,8 +113,9 @@ disable_p2p = true
 它们用 `std::string` 按实际长度在堆上分配（短字段走 SSO）；TOML 文本本身也没有长度上限。
 唯一保留的上游规则是 hostname 规范化后最多 32 个 Unicode 码点。
 
-注意 `inst.get_config_info()` 返回的**诊断快照**仍是定长缓冲（实例名/主机名/网络名
-各 64 字节、入口文本 200 字节），超长取值在快照里会被截断——它只用于日志，不影响生效配置。
+`inst.get_config_info()` 返回的是 **`et::Settings` 深拷贝**：没有定长缓冲、不会截断，
+入口列表按实际条数返回；其中 `network_secret` 字段在返回前已被清零（恒为空串），
+因此可以安全打印。
 
 TOML 语法错误、支持字段取值非法、解析嵌套/语法树超限都会让 **`et::Inst` 构造失败**
 （`valid()==false`，错误码见 `inst.last_error()`）。失败原因由组件以 **Error 级日志**
@@ -226,8 +227,8 @@ void start_easytier() {
   因此**随机生成的缺省值每次都会重新生成**——TOML 里没写 `instance_id` 时每次构造都会得到
   新的 UUID v4；`hostname` 回退 `Espressif`，`instance_name` 按 hostname 推导。
   TOML 里显式给出的 `instance_name` / `instance_id` 仍然优先。
-- 设置项全部是 `Inst` 的私有成员，应用无法直接读写；可读的只有 `get_config_info()`
-  返回的生效配置快照（不含网络密钥）；解析诊断不缓存，直接进日志。
+- 设置项全部是 `Inst` 的私有实现，应用无法直接读写；可读的只有 `get_config_info()`
+  返回的 `et::Settings` 副本（`network_secret` 恒为空）；解析诊断不缓存，直接进日志。
 
 生命周期约定：
 
@@ -257,7 +258,7 @@ tomlc17 自身以 "out of memory" 报错并映射为 `ESP_ERR_NO_MEM`。仍然�
 | 接口 | 可从任意任务 | 可在事件回调中 | 说明 |
 | --- | --- | --- | --- |
 | `inst.last_error` | 是 | 是 | 只读构造阶段的错误码 |
-| `inst.get_status` / `get_config_info` | 是 | 是 | 只读原子量与不可变数据，返回副本 |
+| `inst.get_status` / `get_config_info` | 是 | 是 | 只读原子量 / 深拷贝 `Settings`，与实例无共享 |
 | `inst.set_underlay_ready` | 是 | 是 | 非阻塞（队列投递），物理网络事件里直接调用 |
 | `et::Inst` 构造 | 仅初始化阶段（大栈任务，串行） | 否 | 解析 TOML 并分配约 91 KiB 上下文 |
 | `inst.start` / `stop` / 析构 | 同一任务串行 | **否** | 会等待组件任务退出 |
