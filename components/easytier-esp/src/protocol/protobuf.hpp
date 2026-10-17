@@ -8,7 +8,7 @@
  * 支持范围：
  * - varint / fixed32 / fixed64 / length-delimited；
  * - 未知字段跳过（wire type 0/1/2/5）；
- * - packed 与 unpacked 形式的 repeated 标量（见 for_each_packed_varint）；
+ * - packed 形式的 repeated 标量（见 for_each_packed_varint）；unpacked 由 ProtoReader 逐个读取；
  * - 负数 int32/int64 的 10 字节 zigzag-free 编码（符号扩展到 64 位）；
  * - proto3 的零值省略语义与 optional 字段的显式存在性。
  *

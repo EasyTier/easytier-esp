@@ -38,11 +38,11 @@ inline constexpr size_t kRpcMaxPieces = 32;
 /**
  * @brief 单个 RPC 消息重组后的最大字节数。
  * @note 每个槽位需要"到达顺序"与"片号顺序"两份缓冲，因此这里取 8 KiB：两个槽位
- *       合计约 32 KiB，与设计文档的 RPC 重组预算一致。超过该上限的消息会被拒绝
+ *       合计约 32 KiB，与组件的 RPC 重组预算一致。超过该上限的消息会被拒绝
  *       （可见的 ResourceLimit），本组件拓扑上限为 32 个节点，正常同步远小于该值。
  */
 inline constexpr size_t kRpcMaxBodyBytes = 8 * 1024;
-/** @brief 重组超时（毫秒）。上游保留 10 秒，本实现在设计文档中定为 3 秒。 */
+/** @brief 重组超时（毫秒）。上游保留 10 秒，本实现取 3 秒（更早回收半包）。 */
 inline constexpr uint32_t kRpcReassemblyTimeoutMs = 3000;
 
 /** @brief 发送一个 RPC 报文所需的模板字段。 */
@@ -134,9 +134,6 @@ public:
 
     /** @brief 回收超时槽位。 */
     void expire(uint32_t now_ms) noexcept;
-
-    /** @brief 清空所有槽位（连接断开时调用）。 */
-    void reset() noexcept;
 
 private:
     /** @brief 一个重组槽位。 */

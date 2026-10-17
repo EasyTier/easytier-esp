@@ -20,12 +20,10 @@
 
 #include "data/plane.hpp"
 #include "protocol/wire.hpp"
-#include "support/log.hpp"
 
 namespace et {
 namespace {
 
-constexpr const char* kTag = "ET.DATA";
 /// 数据面轮询周期（毫秒）。
 constexpr uint32_t kLoopPeriodMs = 5;
 constexpr TickType_t kLoopDelayTicks = pdMS_TO_TICKS(kLoopPeriodMs) > 0
@@ -110,8 +108,7 @@ void Context::send_data_frame(Context& ctx, uint32_t generation, uint32_t to_pee
     // 用 Context 里的暂存消息（约 2 KiB），避免把整帧消息放在数据面任务栈上。
     FrameMessage& msg = ctx.data_tx_scratch;
     msg.generation = generation;
-    msg.slot = kAnySlot;   // 由 I/O 任务按 to_peer 选择连接槽
-    msg.to_peer = next_hop;
+    msg.to_peer = next_hop;  // 由 I/O 任务按 to_peer 选择连接槽
     msg.len = static_cast<uint16_t>(kPeerManagerHeaderSize + payload_len);
     std::memcpy(msg.data.data(), frame, msg.len);
     if (xQueueSend(ctx.q_tx, &msg, 0) != pdTRUE) {
@@ -208,7 +205,6 @@ void Context::handle_inbound_data(Context& ctx, FrameMessage& frame) noexcept {
                                    hdr);
         FrameMessage out = frame;
         std::memcpy(out.data.data(), ctx.data_tx_scratch.data.data(), kPeerManagerHeaderSize);
-        out.slot = kAnySlot;
         out.to_peer = plan.next_hop;  // 保持最终目的（PM 头）不变，只改使用的连接
         if (xQueueSend(ctx.q_tx, &out, 0) != pdTRUE) {
             ctx.dropped.fetch_add(1);

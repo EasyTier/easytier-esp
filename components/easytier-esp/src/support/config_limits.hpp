@@ -2,7 +2,7 @@
  * @file config_limits.hpp
  * @brief 编译期资源上限。
  *
- * @details 默认值与设计文档一致；ESP-IDF 构建时通过 Kconfig 覆盖。宿主测试
+ * @details 默认值与组件约定一致；ESP-IDF 构建时通过 Kconfig 覆盖。宿主构建
  * 没有 sdkconfig，因此这里提供同样的默认值，保证两端行为一致。
  */
 #pragma once

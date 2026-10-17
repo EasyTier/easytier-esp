@@ -16,7 +16,6 @@ idf_component_register(
         "http_control.cpp"
     INCLUDE_DIRS
         "."
-        "include"
     REQUIRES
         easytier-esp
         esp_wifi

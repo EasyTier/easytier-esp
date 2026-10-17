@@ -9,9 +9,10 @@
  * - 没有配置类：设置项仍由 TOML 全量构造，应用只能在构造后通过
  *   @ref et::Inst::get_config_info 取一份 @ref Settings 副本（网络密钥字段已抹除）。
  * - **允许多个实例并存**（组件内部没有全局单实例状态）。
- * - 配置格式与上游 EasyTier 核心保持一致（TOML）：无法采用的非 peer 字段用 Warn 日志
- *   说明并忽略；解析失败用 Error 日志说明并通过 @ref et::Inst::last_error 返回错误码
- *   （**不缓存诊断**）。
+ * - 配置格式与上游 EasyTier 核心保持一致（TOML）：**支持的字段写错**（类型/取值非法）
+ *   会让构造失败并用 Error 日志说明，错误码见 @ref et::Inst::last_error ；**不支持的
+ *   字段不解析也不报错**（**不缓存诊断**）。唯一例外：`ipv4` 字符串内容无法解析时
+ *   静默忽略（与上游 `get_ipv4().parse().ok()` 一致）。
  * - 组件不初始化 WiFi、不挂载文件系统、不修改物理默认网卡，这些由应用负责。
  *
  * @note 首版仅适配 ESP-IDF 6.1.x。
@@ -69,7 +70,7 @@ struct Settings {
     std::string instance_name{};                    ///< 实例名（缺省取 hostname）
     std::string hostname{};                         ///< 主机名（缺省 Espressif，规范化后最多 32 码点）
     std::array<uint8_t, 16> instance_id{};          ///< 实例 UUID 字节
-    bool has_instance_id = false;                   ///< 是否已确定 UUID（显式或用例 v4）
+    bool has_instance_id = false;                   ///< 是否已确定 UUID（显式或随机 v4）
     bool instance_name_explicit = false;            ///< instance_name 是否由 TOML 显式给出
 
     std::string network_name{std::string(kDefaultNetworkName)};  ///< 网络名
@@ -195,8 +196,8 @@ class Context;
  *   任务、socket、虚拟网卡与事件回调。常驻内存、任务与连接槽按实例数量叠加，多实例时
  *   应用需自行避免虚拟 IP/网段冲突；
  * - 不可拷贝、不可移动：任务与回调持有上下文地址；
- * - 组件禁用异常，构造不能返回错误码：用 @ref valid / @ref last_error 检查；解析失败与
- *   被忽略的字段直接输出到日志（Error / Warn），**不缓存诊断**。
+ * - 组件禁用异常，构造不能返回错误码：用 @ref valid / @ref last_error 检查；解析失败
+ *   直接输出 Error 日志（不支持的字段不解析、不报错），**不缓存诊断**。
  *
  * 典型调用顺序：
  * @code
@@ -245,9 +246,10 @@ public:
      * @brief 用 TOML 文本构造实例（不启动任务）。
      * @param toml TOML 文本，可带 EMBED_TXTFILES 追加的单个末尾 NUL；内部非法 NUL 仍拒绝
      * @param options 事件回调等运行期选项
-     * @note 构造无法返回错误码：失败（TOML 语法/peer 错误、结构校验失败、上下文分配失败）
-     *       时对象 @ref valid 为 false，原因见 @ref last_error ；具体错误已由组件以
-     *       Error 级日志输出，被忽略的字段以 Warn 级日志输出，**不缓存诊断**。
+     * @note 构造无法返回错误码：失败（TOML 语法/peer 错误、支持字段取值非法、结构校验
+     *       失败、上下文分配失败）时对象 @ref valid 为 false，原因见 @ref last_error ；
+     *       具体错误已由组件以 Error 级日志输出，**不缓存诊断**。唯一例外：`ipv4`
+     *       字符串内容无法解析时静默忽略（视为未配置静态地址）。
      */
     explicit Inst(std::string_view toml, const RuntimeOptions& options = {}) noexcept;
 
@@ -321,7 +323,7 @@ public:
     esp_err_t stop(uint32_t timeout_ms = 5000) noexcept;
 
 private:
-    Context* ctx_ = nullptr;    ///< 堆上的运行上下文（92,808 B ≈ 91 KiB，RAII，建议启用 PSRAM）
+    Context* ctx_ = nullptr;    ///< 堆上的运行上下文（92,248 B ≈ 91 KiB，RAII，建议启用 PSRAM）
     esp_err_t last_error_ = ESP_ERR_INVALID_STATE;  ///< 构造阶段错误码
 };
 

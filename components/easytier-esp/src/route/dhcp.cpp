@@ -79,8 +79,7 @@ void DhcpAllocator::commit(const DhcpResult& result) noexcept {
  * @brief 计算自分配决策。
  * @details 与上游逐步对应：选子网 → 判断是否需要换址 → 线性探测候选地址。
  */
-DhcpResult DhcpAllocator::evaluate(bool has_routes, const Ipv4UseSet& used,
-                                   uint32_t random_hint) noexcept {
+DhcpResult DhcpAllocator::evaluate(const Ipv4UseSet& used, uint32_t random_hint) noexcept {
     DhcpResult result{};
 
     // 1) 选择子网：优先沿用当前子网内的通告，其次取通告子网中最靠前的那个。

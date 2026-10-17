@@ -37,11 +37,7 @@ inline constexpr Socket kInvalidSocket = -1;
 /** @brief 关闭套接字（容错：非法句柄直接忽略）。 */
 inline void close_socket(Socket fd) noexcept {
     if (fd != kInvalidSocket) {
-#if defined(ESP_PLATFORM)
         ::close(fd);
-#else
-        ::close(fd);
-#endif
     }
 }
 

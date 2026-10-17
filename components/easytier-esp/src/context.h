@@ -47,9 +47,6 @@ class TcpConn;
 /// 支持的最大并发入口连接数（Kconfig `EASYTIER_ESP_MAX_CONNECTED_PEERS`，默认 6）。
 /// 配置里可以写任意多个入口，多出的入口作为轮换备用。
 inline constexpr size_t kMaxConnSlots = kMaxConnectedPeers;
-/// FrameMessage.slot 的特殊值：不指定槽位（由 I/O 任务按 to_peer 选择）。
-inline constexpr uint8_t kAnySlot = 0xFF;
-
 /// 任务数量
 inline constexpr size_t kTaskCount = 3;
 
@@ -75,7 +72,6 @@ enum class IoEvent : uint8_t {
 struct FrameMessage {
     uint32_t generation = 0;  ///< 连接代际（该槽建立连接时分配）
     uint32_t to_peer = 0;     ///< 目标对端 peer id（0 = 未指定，由 I/O 按槽位选择）
-    uint8_t slot = kAnySlot;  ///< 指定槽位（控制面自己发的帧）；kAnySlot 表示按 to_peer 选
     uint16_t len = 0;         ///< 有效字节数
     std::array<uint8_t, kMaxTcpBodyLen> data{};  ///< PM 头 + payload
 };
@@ -259,7 +255,6 @@ private:
     std::atomic<bool> stop_requested{false};          ///< 停止请求
     std::atomic<uint32_t> generation{1};              ///< 当前连接代际
     std::atomic<uint32_t> my_peer_id{0};              ///< 本端 peer id
-    std::atomic<uint32_t> remote_peer_id{0};          ///< 对端 peer id（握手后）
     std::atomic<size_t> direct_peers{0};              ///< 已握手的直连数量
     std::atomic<uint64_t> dropped{0};                 ///< 丢弃计数
     std::atomic<esp_err_t> last_error{ESP_OK};        ///< 最近错误
@@ -268,7 +263,7 @@ private:
     std::atomic<size_t> reachable_routes{0};          ///< 当前可达路由数（快照统计）
 
     // ---- 控制面（仅控制面任务访问）----------------------------------------
-    RpcReassembler reassembler{};    ///< RPC 分片重组（约 17 KiB，故放在堆上的 Context 里）
+    RpcReassembler reassembler{};    ///< RPC 分片重组（默认 2 槽 × 约 16.6 KiB，故放在堆上）
     RpcRegistry registry{};          ///< RPC 服务注册表
     RpcTransactions transactions{};  ///< RPC 事务表
     /// 控制面 AEAD：与数据面实例相互独立（start() 时按派生密钥创建）。
@@ -318,9 +313,6 @@ private:
     QueueHandle_t q_snapshot = nullptr; ///< 控制面 → 数据面：路由快照（长度 1，按值覆盖）
     SemaphoreHandle_t task_exit = nullptr;  ///< 任务退出确认
 
-    TaskHandle_t io_task_handle = nullptr;     ///< I/O 任务句柄
-    TaskHandle_t proto_task_handle = nullptr;  ///< 控制面任务句柄
-    TaskHandle_t data_task_handle = nullptr;   ///< 数据面任务句柄
     /// 入口连接槽：每个槽一个 TcpConn（内含约 12 KiB 收发缓冲）放在堆上而不是
     /// 任务栈上；生命周期由 I/O 任务管理，控制面通过 peer_id/generation 共享状态。
     std::array<ConnSlot, kMaxConnSlots> slots{};

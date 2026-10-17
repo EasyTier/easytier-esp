@@ -43,7 +43,10 @@ inline constexpr uint32_t kHandshakeMagic = 0xd1e1a5e1u;
 /** @brief 握手协议版本。 */
 inline constexpr uint32_t kProtocolVersion = 1;
 
-/** @brief PeerManagerHeader 中的 packet_type 取值（与上游 PacketType 对齐）。 */
+/**
+ * @brief PeerManagerHeader 中的 packet_type 取值（与上游 PacketType 对齐）。
+ * @note 标注"不支持/上游内部使用"的枚举值只用于对齐上游线格式，代码中不解析。
+ */
 enum class PacketType : uint8_t {
     Invalid = 0,                ///< 非法
     Data = 1,                   ///< 虚拟 IP 数据报文
@@ -69,7 +72,11 @@ enum class PacketType : uint8_t {
     RelayHandshakeAck = 21,        ///< 中继凭证握手应答（不支持）
 };
 
-/** @brief PeerManagerHeader 的 flags 位定义。 */
+/**
+ * @brief PeerManagerHeader 的 flags 位定义。
+ * @note 本组件只产生/解释 @ref Encrypted 与 @ref Compressed 两位；其余常量按上游
+ *       线格式记录，便于对照，代码中不使用。
+ */
 namespace pm_flags {
 
 inline constexpr uint8_t Encrypted = 0x01;      ///< payload 已 AES-GCM 加密

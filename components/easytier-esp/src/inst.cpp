@@ -36,7 +36,8 @@ struct SettingsSecretGuard {
 /**
  * @brief 构造实例：解析 TOML → 补齐身份 → 校验结构 → 分配并准备运行上下文。
  * @note 组件禁用异常，构造不能返回错误码；失败时对象 valid()==false、错误码见
- *       last_error()，具体错误已由 toml.cpp 直接输出日志（不缓存诊断），析构对失败对象安全。
+ *       last_error()，具体错误已由 toml.cpp / config.cpp 直接输出日志（不缓存诊断），
+ *       析构对失败对象安全。
  */
 Inst::Inst(std::string_view toml, const RuntimeOptions& options) noexcept {
     // 从缺省构造的设置开始：缺省值由 Settings 的成员初始化器给出，因此这里天然是
@@ -44,17 +45,17 @@ Inst::Inst(std::string_view toml, const RuntimeOptions& options) noexcept {
     Settings settings{};
     const SettingsSecretGuard secret_guard{settings};
     last_error_ = parse_toml_into(settings, toml);
-    // 即使解析失败也补齐身份，保证错误信息里能看到实例名/hostname。
-    finalize_identity(settings);
     if (last_error_ != ESP_OK) {
         ET_LOGE(kTag, "TOML parse failed: 0x%x", last_error_);
         return;
     }
+    // 补齐身份：hostname 回退 Espressif、instance_name 取 hostname、UUID v4（显式值优先）。
+    finalize_identity(settings);
     last_error_ = validate_config(settings);
     if (last_error_ != ESP_OK) {
         return;
     }
-    // 运行上下文 92,808 B ≈ 91 KiB。未启用 PSRAM 时可能分配失败，这里给出明确提示。
+    // 运行上下文 92,248 B ≈ 91 KiB。未启用 PSRAM 时可能分配失败，这里给出明确提示。
     ctx_ = new (std::nothrow) Context(settings, options);
     if (ctx_ == nullptr) {
         ET_LOGE(kTag, "context allocation failed (%u bytes); enable PSRAM or shrink buffers",

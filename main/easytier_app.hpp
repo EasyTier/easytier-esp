@@ -4,7 +4,7 @@
  *
  * @details 本模块把"组网"从 @c main.cpp 里独立出来：@c main.cpp 只负责 NVS、TCP/IP、
  *          WiFi 与模块装配，本模块负责 @c et::Inst 的全部调用（TOML 文本直接交给构造函数，
- *          组件没有独立的配置类）。对外只暴露三个函数，与 WiFi 事件一一对应：
+ *          组件没有独立的配置类）。对外只暴露两个事件入口，与 WiFi/IP 事件对应：
  *
  * @code
  *   IP_EVENT_STA_GOT_IP          → easytier_app::on_ip_got()
@@ -12,12 +12,11 @@
  * @endcode
  *
  * @note **为什么启动要单独开一个任务**：组网初始化需要较大栈 —— TOML 解析的递归下降、
- *       @c Inst 构造函数内部的 @c Settings 临时对象与密钥派生；而 WiFi/IP 事件回调运行在
+ *       @c Inst 构造函数内部的 @c Settings 临时对象与密钥派生。WiFi/IP 事件回调运行在
  *       系统事件任务（@c CONFIG_ESP_SYSTEM_EVENT_TASK_STACK_SIZE ，本工程 2304 B）上，
- *       并且该任务
- *       是所有 WiFi/IP/其他组件事件共享的分发器。直接在回调里初始化必然栈溢出，且会
- *       阻塞别人的事件；再加上 @c netifapi_* 会同步阻塞到 TCPIP 线程，还有与事件循环
- *       互等的风险。因此回调只做一次 @c xTaskCreate ，重活交给 @ref kStartTaskStack 。
+ *       而该任务还是所有 WiFi/IP/组件事件共享的分发器：在回调里直接初始化必然栈溢出，
+ *       且会阻塞别人的事件；再加上 @c netifapi_* 会同步阻塞到 TCPIP 线程，还有与事件
+ *       循环互等的风险。因此回调只做一次 @c xTaskCreate ，重活交给 8 KiB 的启动任务。
  *
  * @note 一次性任务执行完会自删除（@c vTaskDelete(nullptr) ），8 KiB 栈由 IDLE 任务回收，
  *       不会常驻。
@@ -42,8 +41,5 @@ void on_ip_got() noexcept;
  * @note 组网尚未启动时为空操作；可从 WiFi 事件回调直接调用。
  */
 void on_ip_lost() noexcept;
-
-/** @brief 组网是否已初始化并启动（诊断用）。 */
-bool is_started() noexcept;
 
 }  // namespace easytier_app

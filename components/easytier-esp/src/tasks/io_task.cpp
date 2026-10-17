@@ -39,7 +39,6 @@ constexpr uint32_t kSliceDelayMs = 20;
 /** @brief 收到一帧时的回调上下文。 */
 struct FrameSink {
     Context* ctx = nullptr;   ///< 组件上下文
-    uint8_t slot = 0;         ///< 帧所属的连接槽
     uint32_t generation = 0;  ///< 帧所属的连接代际
 };
 
@@ -58,7 +57,9 @@ void Context::advance_peer_index(const Context& ctx, size_t& index) noexcept {
 static uint32_t schedule_retry(SlotState& st) noexcept {
     st.retry_at_ms = now_ms() + st.backoff_ms;
     const uint32_t delay = st.backoff_ms;
-    st.backoff_ms = (st.backoff_ms >= kMaxBackoffMs) ? kMaxBackoffMs : st.backoff_ms * 2;
+    // 先翻倍再钳位，避免出现 32 秒（封顶值必须是 30 秒）。
+    const uint32_t doubled = st.backoff_ms * 2;
+    st.backoff_ms = doubled > kMaxBackoffMs ? kMaxBackoffMs : doubled;
     return delay;
 }
 
@@ -87,7 +88,6 @@ void Context::post_frame(void* arg, Bytes body) noexcept {
     auto* sink = static_cast<FrameSink*>(arg);
     FrameMessage msg{};
     msg.generation = sink->generation;
-    msg.slot = sink->slot;
     msg.len = static_cast<uint16_t>(body.size());
     std::memcpy(msg.data.data(), body.data(), body.size());
 
@@ -375,7 +375,7 @@ void Context::io_task(void* arg) noexcept {
                 continue;
             }
             const int fd = conn_slot.conn->fd();
-            FrameSink sink{&ctx, static_cast<uint8_t>(i), conn_slot.generation.load()};
+            FrameSink sink{&ctx, conn_slot.generation.load()};
 
             if (ready > 0 && FD_ISSET(fd, &rfds)) {
                 size_t frames = 0;
@@ -398,7 +398,7 @@ void Context::io_task(void* arg) noexcept {
             // 接收缓冲里可能还有完整帧（上一轮帧预算用尽），立刻切分。
             while (conn_slot.conn->connected() &&
                    conn_slot.conn->rx_buffered() >= kTcpTunnelHeaderSize) {
-                FrameSink more_sink{&ctx, static_cast<uint8_t>(i), conn_slot.generation.load()};
+                FrameSink more_sink{&ctx, conn_slot.generation.load()};
                 size_t frames = 0;
                 if (!conn_slot.conn->read_available(&more_sink, &post_frame, frames)) {
                     drop_slot(ctx, i, st);

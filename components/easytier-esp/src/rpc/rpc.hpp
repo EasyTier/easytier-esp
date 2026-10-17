@@ -92,12 +92,11 @@ public:
     /**
      * @brief 登记一个待响应事务。
      * @param generation 当前连接代际
-     * @param to_peer 目标 peer id
      * @param now_ms 当前时间
      * @param timeout_ms 超时时间
      * @return 事务 id；0 表示表已满（0 不是合法事务 id）
      */
-    [[nodiscard]] int64_t allocate(uint32_t generation, uint32_t to_peer, uint32_t now_ms,
+    [[nodiscard]] int64_t allocate(uint32_t generation, uint32_t now_ms,
                                    uint32_t timeout_ms) noexcept;
 
     /**
@@ -109,16 +108,12 @@ public:
     /** @brief 回收超时事务。 */
     void expire(uint32_t now_ms) noexcept;
 
-    /** @brief 清空（连接断开时调用）。 */
-    void reset() noexcept;
-
 private:
     /** @brief 一个挂起事务。 */
     struct Entry {
         bool used = false;
         int64_t transaction_id = 0;
         uint32_t generation = 0;
-        uint32_t to_peer = 0;
         uint32_t deadline_ms = 0;
     };
 

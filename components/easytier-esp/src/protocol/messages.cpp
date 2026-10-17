@@ -2,8 +2,8 @@
  * @file messages.cpp
  * @brief EasyTier protobuf 消息的类型化编解码实现。
  *
- * @details 字段号与上游 .proto 一致；未知字段一律跳过，已知字段线型不匹配时
- * 判定为非法输入（与上游 prost 的行为一致）。
+ * @details 字段号与上游 .proto 一致；未知字段一律跳过；已知字段线型不匹配时跳过
+ * 该字段（宽容解码，避免个别字段损坏导致整包被拒）。
  */
 #include "protocol/messages.hpp"
 
@@ -290,7 +290,7 @@ size_t encode_rpc_request(Bytes request, int32_t timeout_ms, MutBytes out) noexc
 /**
  * @brief 解码 RpcResponse。
  * @note error 字段原样保留为 error_raw；has_error 用于区分"字段不存在"与
- *       "字段存在但取值为 0"（例如 DuplicatePeerId）。
+ *       "存在一个空的 error.Error 消息"。
  */
 bool decode_rpc_response(Bytes in, RpcResponseRef& out) noexcept {
     ProtoReader reader(in);

@@ -77,7 +77,7 @@ bool ipv4_is_valid(std::span<const uint8_t> ip_packet, uint16_t mtu) noexcept {
     if (total_length > mtu) {
         return false;  // 超过虚拟 MTU
     }
-    // 分片报文（本组件不重组 IP 分片，交由上层避免）。
+    // 非首片报文（片偏移 != 0）无法投递；本组件不重组 IP 分片，首片原样放行。
     const uint16_t flags_offset = get_u16_be(ip_packet.data() + 6);
     if ((flags_offset & 0x1FFF) != 0) {
         return false;

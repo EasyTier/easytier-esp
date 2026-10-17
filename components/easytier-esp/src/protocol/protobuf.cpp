@@ -4,13 +4,9 @@
  */
 #include "protocol/protobuf.hpp"
 
-#include <bit>
 #include <cstring>
 
 namespace et {
-
-// fixed32/fixed64 按主机字节序直接拷贝，因此要求本平台是小端。
-static_assert(std::endian::native == std::endian::little, "protobuf fixed 字段要求小端平台");
 
 namespace {
 

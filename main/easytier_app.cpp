@@ -205,7 +205,7 @@ void start_easytier() {
     et::RuntimeOptions runtime_options{};
     runtime_options.on_event = &on_easytier_event;
     // 构造即初始化：TOML 解析、身份补齐、结构校验与资源分配都在构造函数里完成，
-    // 析构时自动停止并释放。解析失败/被忽略字段的细节已由组件直接输出日志。
+    // 析构时自动停止并释放；构造失败的具体原因由组件以 Error 日志输出。
     g_inst.emplace(toml, runtime_options);
     if (!g_inst->valid()) {
         ESP_LOGE(kTag, "easytier config rejected: 0x%x", g_inst->last_error());
@@ -280,8 +280,6 @@ void on_ip_lost() noexcept {
     }
 }
 
-bool is_started() noexcept { return g_started; }
-
 }  // namespace easytier_app
 
 #else  // !CONFIG_EXAMPLE_EASYTIER_TOML_ENABLED
@@ -291,8 +289,6 @@ namespace easytier_app {
 // 关闭「启动时加载内嵌的 easytier.toml 并组网」：示例只连 WiFi，便于先验证网络连通性。
 void on_ip_got() noexcept {}
 void on_ip_lost() noexcept {}
-bool is_started() noexcept { return false; }
-
 }  // namespace easytier_app
 
 #endif  // CONFIG_EXAMPLE_EASYTIER_TOML_ENABLED

@@ -71,19 +71,17 @@ public:
      */
     void configure(bool has_subnet, uint32_t subnet, uint8_t prefix) noexcept;
 
-    /** @brief 复位（连接断开/重新组网时调用）。 */
+    /** @brief 复位当前地址与计数（由 SyncEngine::configure 调用）。 */
     void reset() noexcept;
 
     /**
      * @brief 计算下一步决策。
-     * @param has_routes 是否已经收到过任何拓扑（决定是否允许回落到默认子网）
      * @param used 已用地址集合
      * @param random_hint 随机数（用于打散自举时的地址选择；测试可传固定值）
      */
-    [[nodiscard]] DhcpResult evaluate(bool has_routes, const Ipv4UseSet& used,
-                                      uint32_t random_hint) noexcept;
+    [[nodiscard]] DhcpResult evaluate(const Ipv4UseSet& used, uint32_t random_hint) noexcept;
 
-    /** @brief 提交一次决策结果（Change 之后调用）。 */
+    /** @brief 提交一次决策结果（每次非 WaitForPeers 决策后调用）。 */
     void commit(const DhcpResult& result) noexcept;
 
 

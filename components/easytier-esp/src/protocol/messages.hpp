@@ -2,8 +2,7 @@
  * @file messages.hpp
  * @brief 本组件用到的 EasyTier protobuf 消息的类型化编解码。
  *
- * @details 字段号与上游 .proto 严格一致（peer_rpc.proto / common.proto），并
- * 用 Google protobuf 运行期生成的黄金样本做回归验证。
+ * @details 字段号与上游 .proto 严格一致（peer_rpc.proto / common.proto）。
  *
  * @warning 解码得到的视图（string_view / Bytes）指向调用方的输入缓冲区，
  *          在该视图使用期间，输入缓冲区必须保持有效且内容不变。
@@ -99,7 +98,7 @@ size_t encode_rpc_packet(const RpcPacketRef& packet, MutBytes out) noexcept;
 /** @brief RPC 请求体（common.RpcRequest）。 */
 struct RpcRequestRef {
     Bytes request{};        ///< 服务入参的序列化字节
-    int32_t timeout_ms = 0;  ///< 期望超时
+    int32_t timeout_ms = 0;  ///< 对端期望超时（本组件不据此调整事务超时）
 };
 
 /** @brief 解码 RpcRequest。 */
@@ -110,14 +109,14 @@ size_t encode_rpc_request(Bytes request, int32_t timeout_ms, MutBytes out) noexc
 /**
  * @brief RPC 响应体（common.RpcResponse）。
  *
- * @note @ref error_raw 是 error.Error 的原始字节：本组件不解析错误枚举，只做
+ * @note @ref error_raw 是 error.Error 的原始字节：本组件不解析其内容，只做
  *       原样透传，避免因上游新增错误类型而误解码。
  */
 struct RpcResponseRef {
     Bytes response{};      ///< 服务返回值的序列化字节
     bool has_error = false;  ///< 是否携带 error 字段（与 error=0 有存在性区别）
     Bytes error_raw{};     ///< error.Error 原始字节
-    uint64_t runtime_us = 0;  ///< 服务端执行耗时
+    uint64_t runtime_us = 0;  ///< 服务端执行耗时（本组件恒填 0，解码后不使用）
 };
 
 /** @brief 解码 RpcResponse。 */

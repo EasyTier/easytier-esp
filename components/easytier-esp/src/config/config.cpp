@@ -18,7 +18,8 @@ constexpr const char* kTag = "ET.CONFIG";
 
 /** @brief 是否为需要从主机名中剔除的控制字符。 */
 [[nodiscard]] bool is_control(uint32_t cp) noexcept {
-    return cp < 0x20 || cp == 0x7f;
+    // Unicode Cc：C0（U+0000..U+001F）、DEL（U+007F）与 C1（U+0080..U+009F）。
+    return cp < 0x20 || (cp >= 0x7f && cp <= 0x9f);
 }
 
 /**
@@ -178,7 +179,7 @@ bool parse_ipv4_cidr(std::string_view text, uint32_t& addr, uint8_t& prefix,
     return true;
 }
 
-/** @brief 解析 8-4-4-4-12 UUID 文本；连字符可省略但不能少于 32 个十六进制位。 */
+/** @brief 解析 UUID 文本：忽略任意位置的连字符，要求恰好 32 个十六进制位（不校验分组）。 */
 bool parse_uuid_text(std::string_view text, std::array<uint8_t, 16>& out) noexcept {
     size_t out_index = 0;
     int high = -1;
@@ -335,20 +336,6 @@ esp_err_t validate_config(const Settings& cfg) noexcept {
         }
     }
     return ESP_OK;
-}
-
-/** @brief 把 16 字节 UUID 格式化为标准文本（8-4-4-4-12）。 */
-void format_uuid_text(const uint8_t* id, char* out) noexcept {
-    static constexpr char kHex[] = "0123456789abcdef";
-    size_t pos = 0;
-    for (size_t i = 0; i < 16; ++i) {
-        if (i == 4 || i == 6 || i == 8 || i == 10) {
-            out[pos++] = '-';
-        }
-        out[pos++] = kHex[(id[i] >> 4) & 0x0F];
-        out[pos++] = kHex[id[i] & 0x0F];
-    }
-    out[pos] = '\0';
 }
 
 }  // namespace et

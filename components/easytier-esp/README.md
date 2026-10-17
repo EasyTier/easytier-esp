@@ -4,7 +4,6 @@
 
 - **仅适配 ESP-IDF 6.1.x**（`idf_component.yml` 声明 `>=6.1,<6.2`），首版在 ESP32-S3 上验证。
 - 协议基线：本地 EasyTier 提交 `32dc7f1f406e5fe43ba095a918a7a1c4b28f2335`（`v2.7.0-24-g32dc7f1f`）。
-- 遗留问题与精简待办：[docs/遗留问题清单.md](../../docs/遗留问题清单.md)。
 
 ## 职责边界
 
@@ -16,7 +15,7 @@
 
 ## 当前实现状态
 
-已实现（有宿主测试与 ESP-IDF 构建证据）：
+已实现（本轮以 ESP-IDF 6.1 构建验证；历史宿主测试记录见提交历史）：
 
 - 与上游核心相同格式的 TOML 配置（`et::Inst` 构造函数直接接受 TOML 文本，应用自行读文件）：
   支持的字段必须写对，不支持的字段不解析也不报错（对齐上游 serde 行为）；
@@ -31,9 +30,9 @@
   有向图 Dijkstra（avoid_relay 惩罚）与下一跳/IP 路由快照，可达后上报 `NetworkReady`；
 - 三个任务、队列与有界资源、`et::Inst` RAII 实例的完整生命周期
   （构造=解析 TOML+校验+分配+派生密钥，析构=自动停止并释放；**允许并存多个实例**）；
-- **唯一的公开类 `et::Inst`**：没有独立的配置类，全部设置项都是实例私有实现
-  （内部 `Settings`：`std::string`/`std::vector`，缺省值 + TOML 全量替换）、身份补齐
-  （hostname→instance_name、随机 UUID v4）；解析失败与忽略项直接输出日志，不缓存诊断；
+- **唯一的公开类 `et::Inst`**：没有配置类，设置项只由 TOML 构造（缺省值 + 全量替换，
+  `std::string`/`std::vector`），身份补齐（hostname→instance_name、随机 UUID v4）；
+  支持的字段写错会构造失败并打 Error 日志，不支持的字段不解析也不报错；
 - `SyncEngine`：路由同步的全部纯逻辑（拓扑合并、最短路、dhcp、请求/响应编解码）
   与任务解耦，因此**可以在宿主测试里让多个引擎互相对话**，验证两节点互通与
   A—B—C 经中继收敛；
@@ -155,7 +154,7 @@ TOML 语法错误、支持字段取值非法、解析嵌套/语法树超限都�
 IDF 6.1 默认把 lwIP `netif->state` 当作 `esp_netif_t*`，原实现却在此保存
 `VirtualNetif*`，导致地址变化回调访问错误对象。raw 虚拟网卡现在保持 `state=nullptr`，
 通过标准布局首成员找回自身对象，继续使用 `netifapi_*` 与 `tcpip_input`。
-设备侧生命周期/改址测试检查该隔离关系；仍需用户上板执行确认。
+该隔离关系由布局断言与注释约束；仍需用户上板执行确认。
 
 单入口不再被两个连接槽同时连接，相同 host:port 已占用时不会再次选用。
 每槽重试使用独立截止时间，避免等待备用入口时阻塞现有连接的收发与保活。
@@ -302,7 +301,7 @@ tomlc17 自身以 "out of memory" 报错并映射为 `ESP_ERR_NO_MEM`。仍然�
 
 | 项目 | 大小 | 说明 |
 | --- | --- | --- |
-| `Context`（堆） | 92,808 B | RPC 重组 33,184（2 槽 × 16 KiB）+ `SyncEngine` 35,240（拓扑 22,928 + 邻接表 8,968 + 快照 524 + 编码缓冲）+ RPC 收发缓冲约 14,000 + `Settings` 外壳 + 其它 |
+| `Context`（堆） | 92,248 B | `RpcReassembler`（2 槽 × 16 KiB ≈ 33 KiB）+ `SyncEngine`（拓扑 / 邻接表 / 快照 / 编码缓冲 ≈ 35 KiB）+ RPC 收发缓冲（≈ 15 KiB）+ `Settings` 外壳 + 其它 |
 | `Inst` 对象本体 | 8 B | 私有 `Context*` + `esp_err_t last_error_`（诊断与 `started_` 都不在 `Inst` 上）；设置项与运行状态在堆上的 `Context` 内 |
 | `Settings` 文本字段（堆） | 按实际长度 | 实例名 / 主机名 / 网络名 / 网络密钥都是 `std::string`（短字段走 SSO），**长度无固定上限** |
 | 入口地址列表（堆） | 每条约 32 B + 主机文本 | `std::vector<PeerEndpoint>`，按配置实际条数分配；条目数量无上限 |
@@ -313,9 +312,10 @@ tomlc17 自身以 "out of memory" 报错并映射为 `ESP_ERR_NO_MEM`。仍然�
 | 任务栈 | 24 KiB | I/O 6 KiB + 控制面 10 KiB + 数据面 8 KiB |
 | TOML 解析 | 按文本规模（瞬时） | 无固定预算；分配失败由解析器报 OOM，受语法树/深度限额约束 |
 
-因此**强烈建议启用 PSRAM**：示例 `sdkconfig.defaults` 已启用（大于 16 KiB 的分配会落到
-PSRAM）。组件内用 `static_assert(sizeof(Context) < 112 KiB)` 防止常驻内存悄悄膨胀，
-启动日志也会打印实际 `sizeof(Context)`。
+因此**强烈建议启用 PSRAM**（menuconfig 打开 `CONFIG_SPIRAM`，大于 16 KiB 的分配会落到
+PSRAM）；示例 `sdkconfig.defaults` 只调大了 socket 上限，并未默认开启 PSRAM。
+组件内用 `static_assert(sizeof(Context) < 112 KiB)` 防止常驻内存悄悄膨胀，启动日志也会
+打印实际 `sizeof(Context)`。
 
 ## 构建与验证（不需要开发板）
 
@@ -337,9 +337,9 @@ python3 tools/check_stack_usage.py
 ```
 
 用 `-fstack-usage` + ELF 调用图计算三个任务入口的最坏调用链，与声明的栈大小比较
-（当前：I/O 2400/6144、控制面 5632/10240、数据面 4400/8192 字节）。大缓冲一律放在
+（当前：I/O 2448/6144、控制面 5696/10240、数据面 4224/8192 字节）。大缓冲一律放在
 `Context`/`SyncEngine` 成员或堆上，任务栈上只保留小对象——这一点很容易在重构中被破坏，
-所以该检查应当与宿主测试一起跑。
+所以每次改动任务或缓冲后都应重跑该检查。
 
 ## 硬件联调
 
@@ -350,20 +350,20 @@ python3 tools/check_stack_usage.py
 3. 示例启动后会打印**实际生效的配置**（`inst.get_config_info()`）与每 10 秒一行
    状态摘要，可与入口节点（Linux 侧 `easytier-cli`）的日志逐条对照。
 
-> 原来的《硬件联调指南》与《验收证据清单》已按用户要求移除；需要时可按
-> [docs/遗留问题清单.md](../../docs/遗留问题清单.md) 附录 B 取回。
+> 原来的《硬件联调指南》《验收证据清单》与 `docs/遗留问题清单.md` 已按用户要求移除；
+> 需要时可在提交 `4ecd063` 等历史提交中取回。
 
 示例在启动时会打印**实际生效的配置**（`inst.get_config_info()`），并每 10 秒打印一行
 状态摘要，便于和入口节点日志对照：
 
 ```
-I (3120) easytier-example: config: instance=esp32-demo network=esp-demo instance_id=...
-I (3130) easytier-example: config: peer[0]=192.168.1.20:11010
-I (3140) easytier-example: config: ipv4=10.144.144.10/24 mtu=1380
-I (3150) easytier-example: easytier started, peer_id=0x1a2b3c4d
-I (4120) easytier-example: peer connected: 0x5e6f7a8b
-I (5120) easytier-example: network ready: 1 reachable peer(s)
-I (5130) easytier-example: status: state=ready peer_id=0x1a2b3c4d vip=10.144.144.10/24 direct=1 routes=1 dropped=0 err=0x0
+I (3120) et_easytier: config: instance=esp32-demo hostname=esp32-s3 network=esp-demo instance_id=...
+I (3130) et_easytier: config: peer[0]=192.168.1.20:11010
+I (3140) et_easytier: config: ipv4=10.144.144.10/24 mtu=1380
+I (3150) et_easytier: easytier started, peer_id=439041101
+I (4120) et_easytier: peer connected: 1584368267
+I (5120) et_easytier: network ready, virtual ip=10.144.144.10/24
+I (5130) et_easytier: status: state=ready peer_id=0x1a2b3c4d vip=10.144.144.10/24 direct=1 routes=1 dropped=0 err=0x0
 ```
 
 ## 第三方代码

@@ -193,14 +193,12 @@ RpcReassembleResult RpcReassembler::feed(uint32_t generation, const RpcPacketRef
         return RpcReassembleResult::Rejected;
     }
     if (slot == nullptr) {
+        // find_or_allocate 总会复用已有槽位或回收最旧槽位，因此不会返回空指针。
         slot = find_or_allocate(key, total, now_ms);
-        if (slot == nullptr) {
-            return RpcReassembleResult::Rejected;
-        }
     }
 
     if (slot->have[idx]) {
-        // 一致重复片：忽略；内容不同则视为冲突。
+        // 重复片：长度一致则忽略（不比较内容）；长度不同视为冲突。
         if (slot->piece_len[idx] != packet.body.size()) {
             slot->used = false;
             return RpcReassembleResult::Rejected;
@@ -246,13 +244,6 @@ void RpcReassembler::expire(uint32_t now_ms) noexcept {
             ET_LOGW(kTag, "rpc reassembly timed out");
             slot.used = false;
         }
-    }
-}
-
-/** @brief 清空全部槽位。 */
-void RpcReassembler::reset() noexcept {
-    for (Slot& slot : slots_) {
-        slot.used = false;
     }
 }
 

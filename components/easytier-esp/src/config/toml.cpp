@@ -382,11 +382,11 @@ bool toml_scan_limits(std::string_view text) noexcept {
 /**
  * @brief 解析并映射 TOML 文本。
  *
- * @details 处理顺序：深度限额 → 解析 → 语法树结构校验 → 根级未知键日志 → 宽容逐字段提取
- *          → dhcp/ipv4 优先级收敛 → 释放语法树。调用方（@ref et::Inst 的构造函数）总是从
- *          缺省构造的 @ref Settings 开始，因此这里等价于"缺省值 + TOML"。
- *          **不缓存诊断**：不能采用的非 peer 字段用 Warn 日志记录，真正失败（语法错误、
- *          入口非法、资源超限）用 Error 日志记录并返回错误码。
+ * @details 处理顺序：深度限额 → 解析 → 语法树结构校验 → 逐字段提取（根级未知键与未实现
+ *          的字段直接跳过）→ dhcp/ipv4 优先级收敛 → 释放语法树。调用方（@ref et::Inst 的
+ *          构造函数）总是从缺省构造的 @ref Settings 开始，因此这里等价于"缺省值 + TOML"。
+ *          **不缓存诊断**：真正失败（语法错误、入口非法、资源超限）用 Error 日志记录并
+ *          返回错误码；不支持的字段不解析也不报错。
  */
 esp_err_t parse_toml_into(Settings& out, std::string_view text) noexcept {
     // ESP-IDF EMBED_TXTFILES 的结束符属于容器而非 TOML；只移除末尾一个 NUL，

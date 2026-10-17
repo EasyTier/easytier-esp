@@ -57,24 +57,17 @@ void zeroize_string(std::string& text) noexcept;
                                    bool& had_prefix) noexcept;
 
 /**
- * @brief 解析 8-4-4-4-12 形式的 UUID 文本。
+ * @brief 解析 UUID 文本：忽略任意位置的连字符，要求恰好 32 个十六进制位。
  * @param text 输入文本
  * @param out 输出 16 字节
  */
 [[nodiscard]] bool parse_uuid_text(std::string_view text, std::array<uint8_t, 16>& out) noexcept;
 
 /**
- * @brief 把 16 字节 UUID 格式化为标准文本（36 字符 + 结尾 NUL）。
- * @param id 16 字节 UUID
- * @param out 输出缓冲（至少 37 字节）
- */
-void format_uuid_text(const uint8_t* id, char* out) noexcept;
-
-/**
  * @brief 按上游 hostname 规则规范化后写入 @p out 。
  *
  * @details 去除控制字符，最多保留 32 个 Unicode 码点（上游 `hostname` 规则），因此结果
- *          不会超过 128 字节（在 `std::string` 的 SSO 范围内）。
+ *          不会超过 128 字节。
  * @param in 原始主机名
  * @param out 输出文本；失败（含全是控制字符）时被清空
  */

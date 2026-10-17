@@ -61,7 +61,6 @@ TopoPeer* Topology::find_or_allocate(uint32_t peer_id) noexcept {
     return &peer;
 }
 
-/** @brief 登记本节点（version 固定为 1，参与建图）。 */
 /**
  * @brief 清空某个节点已保存的信息（保留 id 作为占位，不参与建图）。
  * @details 上游在"对端 session id 变化"时会清空该对端已保存的信息并要求重新同步
@@ -123,9 +122,11 @@ Topology::MergeResult Topology::merge_peer(const RoutePeerInfoView& info,
     peer->version = info.version;
     peer->has_ipv4 = info.has_ipv4;
     peer->ipv4 = info.ipv4;
+    // 上游未填 network_length 时按 /24 处理，避免把 0 当成"整个地址空间已占用"。
+    const uint32_t prefix = info.network_length == 0 ? 24 : info.network_length;
+    peer->network_length = static_cast<uint8_t>(prefix > 32 ? 32 : prefix);
     peer->feature_flags = info.feature_flags;
     peer->peer_route_id = info.peer_route_id;
-    peer->inst_id = info.inst_id;
     peer->last_update_ms = now_ms;
     // version == 0 只作为占位，不参与建图（与上游一致）。
     peer->in_graph = info.version != 0;

@@ -35,10 +35,10 @@ constexpr const char* kTag = "ET.CONTEXT";
 
 // 单个实例的常驻内存必须保持有界：Context 在堆上分配（大于 16 KiB 的分配会走
 // PSRAM），但仍要有上限，避免后续加入功能时悄悄膨胀。实测组成（ESP32-S3，字节）：
-//   Context 合计 92808（不含解析诊断：诊断已改为直接写日志，不再缓存报告）
+//   Context 合计 92248（不含解析诊断：诊断已改为直接写日志，不再缓存报告）
 //     ├─ RpcReassembler（2 槽 × (8 KiB 收包 + 8 KiB 有序缓冲)）33184
-//     ├─ SyncEngine（Topology 22928 + 2 个 ConnList 8968 + 快照 524 + 编码缓冲）35240
-//     ├─ RPC 收发缓冲（body 8 KiB + service 4 KiB + 其它）约 14000
+//     ├─ SyncEngine（拓扑 / 最短路 / 邻接表 / 快照 / 编码缓冲）约 34.7 KiB
+//     ├─ RPC 收发缓冲（body 8 KiB + service 4 KiB + 组帧/错误缓冲，见成员声明）
 //     ├─ Settings 外壳（std::string / std::vector 的小对象，文本与入口在堆上）
 //     └─ 其它（AEAD 指针、原子量、dhcp/网卡状态等）
 // 入口地址列表与实例名/主机名/网络名/网络密钥都由 std::string/vector 按实际长度在堆上分配，
@@ -117,9 +117,6 @@ esp_err_t Context::stop(uint32_t timeout_ms) noexcept {
         (void)virtual_netif.set_link(false);
     }
     state.store(State::Stopped);
-    io_task_handle = nullptr;
-    proto_task_handle = nullptr;
-    data_task_handle = nullptr;
     return ESP_OK;
 #else
     (void)timeout_ms;
@@ -243,8 +240,8 @@ esp_err_t Context::create_runtime() noexcept {
             static_cast<unsigned>(kQueueRxCtrlDepth), static_cast<unsigned>(kQueueTxDepth),
             static_cast<unsigned>(kQueueRxDataDepth), static_cast<unsigned>(kQueueSmallDepth),
             static_cast<unsigned>(kQueueNetifDepth));
-    // 静态地址时立即可用；dhcp 地址在控制面算出后再创建网卡。
-    // 与物理网段重叠的虚拟网段会破坏正常路由，这里显式拒绝（见 proto_task 的同名检查）。
+    // 静态地址时立即可用；dhcp 地址在控制面算出后再创建网卡。静态地址在此直接建网卡，
+    // 不与物理网段做重叠检查（重叠检查在控制面的 sync_netif_address 路径上做）。
     if (settings.has_static_ipv4) {
         const esp_err_t netif_err = virtual_netif.create(
             settings.static_ipv4, settings.static_prefix, settings.mtu,
@@ -257,19 +254,19 @@ esp_err_t Context::create_runtime() noexcept {
     }
 
     if (xTaskCreate(&Context::io_task, "et_io", kIoTaskStack, this, kIoTaskPriority,
-                    &io_task_handle) != pdPASS) {
+                    nullptr) != pdPASS) {
         ET_LOGE(kTag, "cannot create et_io task (stack %u bytes)", kIoTaskStack);
         return ESP_ERR_NO_MEM;
     }
     if (xTaskCreate(&Context::proto_task, "et_proto", kProtoTaskStack, this, kProtoTaskPriority,
-                    &proto_task_handle) != pdPASS) {
+                    nullptr) != pdPASS) {
         ET_LOGE(kTag, "cannot create et_proto task (stack %u bytes)", kProtoTaskStack);
         stop_requested.store(true);
         (void)xSemaphoreTake(task_exit, pdMS_TO_TICKS(1000));
         return ESP_ERR_NO_MEM;
     }
     if (xTaskCreate(&Context::data_task, "et_data", kDataTaskStack, this, kDataTaskPriority,
-                    &data_task_handle) != pdPASS) {
+                    nullptr) != pdPASS) {
         ET_LOGE(kTag, "cannot create et_data task (stack %u bytes)", kDataTaskStack);
         stop_requested.store(true);
         for (int i = 0; i < 2; ++i) {

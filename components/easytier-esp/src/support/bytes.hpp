@@ -32,7 +32,7 @@ using MutBytes = std::span<uint8_t>;
            static_cast<uint64_t>(get_u32_le(p + 4)) << 32;
 }
 
-/** @brief 从缓冲区读取大端 u32（protobuf 中 IPv4 地址使用该表示）。 */
+/** @brief 从缓冲区读取大端 u32（IPv4 头中的地址字段使用该表示）。 */
 [[nodiscard]] constexpr uint32_t get_u32_be(const uint8_t* p) noexcept {
     return static_cast<uint32_t>(p[0]) << 24 | static_cast<uint32_t>(p[1]) << 16 |
            static_cast<uint32_t>(p[2]) << 8 | static_cast<uint32_t>(p[3]);

@@ -50,7 +50,7 @@ esp_err_t RpcRegistry::dispatch(const RpcDescriptorRef& descriptor, Bytes reques
 }
 
 /** @brief 分配事务 id（随机非零，避免与旧事务冲突）。 */
-int64_t RpcTransactions::allocate(uint32_t generation, uint32_t to_peer, uint32_t now_ms,
+int64_t RpcTransactions::allocate(uint32_t generation, uint32_t now_ms,
                                   uint32_t timeout_ms) noexcept {
     for (Entry& entry : entries_) {
         if (entry.used) {
@@ -63,7 +63,6 @@ int64_t RpcTransactions::allocate(uint32_t generation, uint32_t to_peer, uint32_
         entry.used = true;
         entry.transaction_id = id;
         entry.generation = generation;
-        entry.to_peer = to_peer;
         entry.deadline_ms = now_ms + timeout_ms;
         return id;
     }
@@ -92,13 +91,6 @@ void RpcTransactions::expire(uint32_t now_ms) noexcept {
             ET_LOGW(kTag, "rpc transaction timed out");
             entry.used = false;
         }
-    }
-}
-
-/** @brief 清空事务表。 */
-void RpcTransactions::reset() noexcept {
-    for (Entry& entry : entries_) {
-        entry.used = false;
     }
 }
 

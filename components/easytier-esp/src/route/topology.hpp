@@ -35,9 +35,9 @@ struct TopoPeer {
     uint32_t version = 0;               ///< 信息版本（0 表示占位，不建图）
     bool has_ipv4 = false;              ///< 是否已知虚拟 IPv4
     uint32_t ipv4 = 0;                  ///< 虚拟 IPv4（数值表示）
+    uint8_t network_length = 24;        ///< 通告的虚拟网段前缀长度
     uint16_t feature_flags = 0;         ///< 能力位（见 peer_feature）
     uint64_t peer_route_id = 0;         ///< 节点路由 id
-    Uuid inst_id{};                     ///< 实例 UUID
     uint32_t last_update_ms = 0;        ///< 最近一次更新的本地时间
     bool in_graph = false;              ///< 是否参与建图（version != 0 且未过期）
     std::array<uint8_t, kMaxRawRoutePeerInfoBytes> raw{};  ///< 原始 RoutePeerInfo 字节
@@ -91,7 +91,7 @@ public:
 
     /**
      * @brief 合并一行邻接。
-     * @param connected 直连的 peer id 列表（未知节点会被忽略，由调用方另行请求补发）
+     * @param connected 直连的 peer id 列表（未知节点 id 原样保留，缺失补发由 merge_request 负责）
      */
     MergeResult merge_conn_row(uint32_t peer_id, uint32_t version, const uint32_t* connected,
                                size_t count, uint32_t now_ms) noexcept;

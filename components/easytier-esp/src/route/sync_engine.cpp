@@ -43,7 +43,6 @@ void SyncEngine::reset() noexcept {
     self_info_version_ = 1;
     conn_row_version_ = 1;
     self_peer_info_len_ = 0;
-    has_routes_ = false;
     direct_peer_count_ = 0;
     table_.recompute(topology_, my_peer_id_);
 }
@@ -174,7 +173,7 @@ void SyncEngine::collect_used_addresses() noexcept {
         if (!peer.has_ipv4 || peer.peer_id == my_peer_id_) {
             continue;
         }
-        dhcp_used_.add(peer.ipv4, 24);
+        dhcp_used_.add(peer.ipv4, peer.network_length);
     }
 }
 
@@ -184,7 +183,7 @@ bool SyncEngine::update_dhcp(uint32_t now, uint32_t random_hint) noexcept {
         return false;
     }
     collect_used_addresses();
-    const DhcpResult result = dhcp_.evaluate(has_routes_, dhcp_used_, random_hint);
+    const DhcpResult result = dhcp_.evaluate(dhcp_used_, random_hint);
     if (result.decision == DhcpDecision::WaitForPeers) {
         return false;  // 等对端先通告子网，本轮不提交
     }
@@ -316,7 +315,6 @@ void SyncEngine::add_missing(std::array<uint32_t, kPbMaxRepeatedItems>& list, si
  */
 bool SyncEngine::merge_request(const SyncRequestView& request, SyncResponseView& response,
                                uint32_t now) noexcept {
-    has_routes_ = true;
     const uint32_t sender = request.header.my_peer_id;
     bool duplicate_peer_id = false;
     if (request.has_peer_infos) {
@@ -426,6 +424,9 @@ esp_err_t SyncEngine::handle_response(Bytes response, bool& need_resend) noexcep
     need_resend = view.missing_peer_count != 0 || view.missing_conn_peer_count != 0;
     return ESP_OK;
 }
+
+/** @brief 清理过期拓扑条目。 */
+void SyncEngine::expire_topology(uint32_t now) noexcept { topology_.expire(now); }
 
 /** @brief 拓扑脏时重算路由。 */
 bool SyncEngine::recompute_if_dirty() noexcept {

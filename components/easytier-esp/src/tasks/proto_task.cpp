@@ -2,16 +2,16 @@
  * @file proto_task.cpp
  * @brief 控制面任务：握手、保活、RPC（分片/重组/压缩协商）与状态机。
  *
- * @details 职责（M1 + M2）：
+ * @details 职责：
  * - 消费应用命令（物理网络就绪/断开）与 I/O 事件（连接建立/断开）；
  * - 连接建立后立即发送握手，5 秒内未完成握手则要求 I/O 重连；
  * - 校验对端握手（网络名、摘要、peer id 冲突），成功后进入 Syncing 并上报 PeerUp；
- * - 保活：按 1/2/4/8/16/32 秒退避发送 Ping，收到 Pong 后拉长间隔；
- * - RPC：控制面报文按上游规则加密（对直连对端一律加密），支持分片发送、乱序重组、
+ * - 保活：按 1/2/4/8/16/30 秒退避发送 Ping，收到 Pong 后拉长间隔；
+ * - RPC：加密位跟随 enable_encryption（与数据面共用开关），支持分片发送、乱序重组、
  *   事务匹配与压缩协商（只接受 None，收到 Zstd 视为不支持并上报）；
- * - 服务：M2 注册 `network_name/OspfRouteRpc/SyncRouteInfo/1` 并返回空拓扑响应，
- *   M3 在同一入口填充真实拓扑与会话语义；
- * - 数据面报文（Data）在 M4 实现，这里只计数丢弃。
+ * - 服务：注册 `network_name/OspfRouteRpc/SyncRouteInfo/1`，由 SyncEngine 合并真实
+ *   拓扑并返回本机会话信息；
+ * - Data 帧由 I/O 任务直接分流到数据面队列，不经过本任务。
  */
 #include "context.h"
 
@@ -46,7 +46,7 @@ static_assert(kLoopDelayTicks > 0);
 /// 握手超时（毫秒），与上游一致。
 constexpr uint32_t kHandshakeTimeoutMs = 5000;
 
-/// 路由同步间隔（毫秒）。M3 会按上游会话规则调整。
+/// 路由同步间隔（毫秒）。
 constexpr uint32_t kRouteSyncIntervalMs = 5000;
 /// RPC 事务超时（毫秒）。
 constexpr uint32_t kRpcTimeoutMs = 10000;
@@ -118,8 +118,6 @@ bool Context::send_control_frame(Context& ctx, uint32_t generation, PacketType t
 /**
  * @brief 按上游预算分片发送一个 RPC 消息（内容为 RpcRequest/RpcResponse 的编码）。
  * @param content 已编码的服务入参/返回值
- * @param put_in_rpc_body 为 true 时 content 表示"RpcPacket.body 的原始内容"
- *        （即已编码的 RpcRequest/RpcResponse）
  */
 bool Context::send_rpc_message(Context& ctx, uint32_t generation, const RpcSendTemplate& tmpl,
                       Bytes content) noexcept {
@@ -180,7 +178,7 @@ uint32_t Context::peer_of_generation(const Context& ctx, uint32_t generation) no
 /**
  * @brief 撤销 Ready：遇到无法协商的协议不兼容（当前只有对端使用 zstd 压缩）时调用。
  *
- * @details 设计文档要求"收到 Zstd 上报不支持、取消事务并撤销 Ready"。只设置
+ * @details 约定行为："收到 Zstd 上报不支持、取消事务并撤销 Ready"。只设置
  *          `last_error` 是不够的：节点会一直停在 `ready` 却永远学不到路由，接入方
  *          无法判断组网其实已不可用。这里把状态切到 @ref State::Error 并在**曾经
  *          上报过 Ready** 时补发一次错误事件（避免每个 zstd 报文都刷事件）。
@@ -200,7 +198,7 @@ void Context::handle_rpc_request(Context& ctx, uint32_t generation, const RpcPac
                         Bytes body) noexcept {
     const uint32_t my_peer_id = ctx.my_peer_id.load();
     if (packet.to_peer != my_peer_id) {
-        // 非本地目标的 RPC 需要按 overlay 路由转发，M4 实现。
+        // 调用方已按 to_peer 把非本地目标的 RPC 转发走；这里只做防御性丢弃。
         ctx.dropped.fetch_add(1);
         return;
     }
@@ -250,11 +248,6 @@ void Context::handle_rpc_request(Context& ctx, uint32_t generation, const RpcPac
     (void)send_rpc_message(ctx, generation, tmpl, Bytes(ctx.rpc_body.data(), body_len));
 }
 
-/**
- * @brief 处理一个完整的 RPC 响应。
- * @details 响应只带 missing 列表：如果对方缺少我们的信息（例如它比我们更早启动），
- *          必须立即补发一次带拓扑的同步请求；压缩信息为 Zstd 时按不支持处理。
- */
 /** @brief 检查虚拟网段是否与物理网卡网段重叠（定义见下方）。 */
 static bool physical_subnet_overlaps(uint32_t addr, uint8_t prefix) noexcept;
 
@@ -265,7 +258,7 @@ static bool physical_subnet_overlaps(uint32_t addr, uint8_t prefix) noexcept;
 bool Context::send_sync_request(Context& ctx, uint32_t generation, uint32_t remote_peer_id,
                        bool include_topology, uint32_t now) noexcept {
     const int64_t transaction_id =
-        ctx.transactions.allocate(generation, remote_peer_id, now, kRpcTimeoutMs);
+        ctx.transactions.allocate(generation, now, kRpcTimeoutMs);
     if (transaction_id == 0) {
         return false;
     }
@@ -374,6 +367,11 @@ static bool physical_subnet_overlaps(uint32_t addr, uint8_t prefix) noexcept {
     return ipv4_prefixes_overlap(addr, prefix, phys_ip, phys_prefix);
 }
 
+/**
+ * @brief 处理一个完整的 RPC 响应。
+ * @details 响应只带 missing 列表：如果对方缺少我们的信息（例如它比我们更早启动），
+ *          必须立即补发一次带拓扑的同步请求；压缩信息为 Zstd 时按不支持处理。
+ */
 void Context::handle_rpc_response(Context& ctx, uint32_t generation, const RpcPacketRef& packet,
                          Bytes body) noexcept {
     if (!ctx.transactions.complete(packet.transaction_id, generation)) {
@@ -416,7 +414,7 @@ void Context::proto_task(void* arg) noexcept {
     expect.digest = ctx.digest;
     expect.my_peer_id = ctx.my_peer_id.load();
 
-    // 注册 OSPF 路由同步服务（M2 返回空拓扑，M3 填充真实信息）。
+    // 注册 OSPF 路由同步服务（由 SyncEngine 合并拓扑并返回本机会话信息）。
     if (ctx.registry.size() == 0) {
         const RpcServiceId id{ctx.settings.network_name, kOspfProtoName, kOspfServiceName,
                               kOspfSyncMethodIndex};
@@ -645,7 +643,6 @@ void Context::proto_task(void* arg) noexcept {
                             encode_peer_manager_header(
                                 MutBytes(frame.data.data(), kPeerManagerHeaderSize), forwarded);
                             // 交回 I/O 任务，由它按 to_peer 选择连接槽。
-                            frame.slot = kAnySlot;
                             frame.to_peer = next_hop;
                             if (xQueueSend(ctx.q_tx, &frame, 0) != pdTRUE) {
                                 ctx.dropped.fetch_add(1);
@@ -659,7 +656,7 @@ void Context::proto_task(void* arg) noexcept {
                     break;
                 }
                 default:
-                    // Data 等数据面报文在 M4 实现，这里显式计数而非静默忽略。
+                    // 未知/不该出现在控制面的报文显式计数，而非静默忽略。
                     ctx.dropped.fetch_add(1);
                     break;
             }
@@ -760,9 +757,10 @@ void Context::proto_task(void* arg) noexcept {
             }
         }
 
-        // 7) 超时回收（事务与不完整的分片重组）。
+        // 7) 超时回收（事务、不完整的分片重组与过期拓扑）。
         ctx.transactions.expire(now);
         ctx.reassembler.expire(now);
+        ctx.sync.expire_topology(now);
 
         vTaskDelay(kLoopDelayTicks);
     }

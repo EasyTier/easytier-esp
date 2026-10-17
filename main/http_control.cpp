@@ -61,7 +61,7 @@ esp_err_t handle_toggle(httpd_req_t* req) {
         body, sizeof(body),
         "<!DOCTYPE html><html lang=\"zh-CN\"><head><meta charset=\"utf-8\">"
         "<title>GPIO%d 电平</title></head><body><h1>%s</h1></body></html>",
-        static_cast<int>(kLevelPin), level ? "低电平" : "高电平");
+        static_cast<int>(kLevelPin), level ? "高电平" : "低电平");
     if (len <= 0 || len >= static_cast<int>(sizeof(body))) {
         return httpd_resp_send_500(req);
     }

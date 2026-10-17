@@ -45,8 +45,8 @@ inline constexpr size_t kMaxActivePeers = kMaxConnectedPeers;
  * @code
  * engine.configure(config, my_peer_id);
  * engine.on_peer_up(remote_peer_id, session_id, now);   // 握手成功
- * engine.set_direct_peers(&remote_peer_id, 1);
- * size_t len = engine.build_request(buf, true, now);     // 主动宣告自身
+ * engine.set_direct_peers(&remote_peer_id, 1, now);
+ * size_t len = engine.build_request(buf, true);         // 主动宣告自身
  * engine.handle_request(req, resp, resp_len, now);       // 应答对端
  * engine.handle_response(resp, need_resend);             // 处理 missing
  * if (engine.recompute_if_dirty()) { ...发布快照... }
@@ -60,9 +60,6 @@ public:
     static constexpr size_t kMaxPeerInfosBytes = 1000;
     /** @brief 请求里 conn_list 字段允许占用的最大字节数。 */
     static constexpr size_t kMaxConnListBytes = 700;
-    /** @brief 我方响应缓冲的建议大小（含 missing 列表）。 */
-    static constexpr size_t kMaxResponseBytes = 2048;
-
     /**
      * @brief 配置引擎（复制设置中需要的字段）。
      * @param settings 已校验的实例设置
@@ -70,7 +67,7 @@ public:
      */
     void configure(const Settings& settings, uint32_t my_peer_id) noexcept;
 
-    /** @brief 复位为初始状态（停止/断开时调用）。 */
+    /** @brief 复位为初始状态（由 configure 调用）。 */
     void reset() noexcept;
 
     /** @brief 是否启用 dhcp 自分配。 */
@@ -93,8 +90,7 @@ public:
 
     /**
      * @brief 设置当前直连对端集合。
-     * @details 自身邻接行会列出这些节点；单连接时只有一个元素，多连接（后续增强）
-     *          时会有多个。**本地拓扑也会写入这一行**，否则本节点在图上没有任何出边，
+     * @details 自身邻接行会列出这些节点；单连接时只有一个元素，多连接时会有多个。**本地拓扑也会写入这一行**，否则本节点在图上没有任何出边，
      *          无法把流量交给直连对端（上游的 conn_map 同样包含自身行）。
      * @param now 当前时间（毫秒）
      */
@@ -135,7 +131,7 @@ public:
     /**
      * @brief 处理对端发来的完整同步请求。
      * @param request 已重组的 SyncRouteInfoRequest 字节
-     * @param response 输出缓冲（需 >= kMaxResponseBytes）
+     * @param response 输出缓冲（调用方提供，通常为 4 KiB 的 rpc_service_out）
      * @param response_len 输出长度
      * @param now 当前时间（毫秒）
      */
@@ -156,6 +152,9 @@ public:
     [[nodiscard]] const RouteSnapshot& snapshot() const noexcept { return table_.snapshot(); }
     /** @brief 拓扑（只读，测试与诊断用）。 */
     [[nodiscard]] const Topology& topology() const noexcept { return topology_; }
+
+    /** @brief 清理过期拓扑条目（控制面每轮调用；见 Topology::expire）。 */
+    void expire_topology(uint32_t now) noexcept;
 
 private:
     /** @brief 构造/刷新本节点 RoutePeerInfo 的编码。 */
@@ -199,7 +198,6 @@ private:
     uint32_t conn_row_version_ = 1;      ///< 自身邻接行版本
     uint32_t my_ipv4_ = 0;               ///< 当前虚拟地址
     uint8_t my_prefix_ = 24;             ///< 当前前缀
-    bool has_routes_ = false;            ///< 是否收到过任何拓扑
 
     std::array<uint32_t, kMaxRoutePeers> direct_peers_{};  ///< 直连对端集合
     size_t direct_peer_count_ = 0;                         ///< 直连数量

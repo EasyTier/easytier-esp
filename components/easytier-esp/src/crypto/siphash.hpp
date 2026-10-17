@@ -45,9 +45,6 @@ public:
      */
     [[nodiscard]] uint64_t finish() const noexcept;
 
-    /** @brief 已写入的总字节数（finish 只用其低 8 位参与计算）。 */
-    [[nodiscard]] uint64_t length() const noexcept { return length_; }
-
 private:
     /** @brief SipHash 的一轮混合运算。 */
     void round() noexcept;

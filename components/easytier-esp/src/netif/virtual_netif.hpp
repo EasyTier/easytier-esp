@@ -56,7 +56,6 @@ public:
     /** @brief 移除网卡并释放状态。 */
     void destroy() noexcept;
 
-
     /** @brief 创建参数中的 MTU，供 TCPIP 初始化回调读取。 */
     [[nodiscard]] uint16_t configured_mtu() const noexcept { return mtu_; }
 
@@ -79,7 +78,7 @@ public:
 private:
     // 必须保持首成员；from_netif 用标准布局类首成员的指针互转规则找回对象。
     struct netif netif_{};        ///< lwIP 网卡结构，state 始终为空
-    uint16_t mtu_ = kDefaultMtu;  ///< 创建时由 TCPIP 初始化回调设置
+    uint16_t mtu_ = kDefaultMtu;  ///< create() 设置，TCPIP 初始化回调读取后写入 netif
     void* rx_queue_ = nullptr;    ///< 数据面接收队列
     const std::atomic<uint32_t>* generation_ = nullptr;  ///< 代际指针（属于 Context）
     bool created_ = false;        ///< 是否已注册

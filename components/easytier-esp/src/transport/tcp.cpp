@@ -104,7 +104,7 @@ ConnectState TcpConn::poll_connect() noexcept {
     return state_;
 }
 
-/** @brief 关闭并复位收发状态（保留 rx 中已收到的完整帧由调用方先行处理）。 */
+/** @brief 关闭并复位收发状态（rx 中未处理的字节与完整帧会被丢弃，调用方需先行处理）。 */
 void TcpConn::close() noexcept {
     net::close_socket(fd_);
     fd_ = net::kInvalidSocket;
