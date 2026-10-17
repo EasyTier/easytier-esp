@@ -302,7 +302,7 @@ tomlc17 自身以 "out of memory" 报错并映射为 `ESP_ERR_NO_MEM`。仍然�
 | 项目 | 大小 | 说明 |
 | --- | --- | --- |
 | `Context`（堆） | 92,808 B | RPC 重组 33,184（2 槽 × 16 KiB）+ `SyncEngine` 35,240（拓扑 22,928 + 邻接表 8,968 + 快照 524 + 编码缓冲）+ RPC 收发缓冲约 14,000 + `Settings` 外壳 + 其它 |
-| `Inst` 对象本体 | 约 12 B | 私有 `Context*` + `bool started_` + `esp_err_t last_error_`（诊断不再缓存）；设置项与运行状态在堆上的 `Context` 内 |
+| `Inst` 对象本体 | 8 B | 私有 `Context*` + `esp_err_t last_error_`（诊断与 `started_` 都不在 `Inst` 上）；设置项与运行状态在堆上的 `Context` 内 |
 | `Settings` 文本字段（堆） | 按实际长度 | 实例名 / 主机名 / 网络名 / 网络密钥都是 `std::string`（短字段走 SSO），**长度无固定上限** |
 | 入口地址列表（堆） | 每条约 32 B + 主机文本 | `std::vector<PeerEndpoint>`，按配置实际条数分配；条目数量无上限 |
 | 帧队列 `q_rx_ctrl`/`q_tx`/`q_rx_data` | 默认约 47 KiB | 深度各 8（Kconfig `EASYTIER_ESP_QUEUE_*_DEPTH`）× 约 2 KiB；深度可直接换算成常驻内存 |

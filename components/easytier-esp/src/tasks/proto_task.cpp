@@ -53,8 +53,10 @@ constexpr uint32_t kRpcTimeoutMs = 10000;
 /// 收到对方拓扑后主动反向宣告的最小间隔（毫秒），避免同步风暴。
 constexpr uint32_t kMinReverseSyncMs = 1000;
 
+}  // namespace
+
 /** @brief 把一帧投递给 I/O 任务发送（带代际，旧代际会被丢弃）。 */
-bool send_frame(Context& ctx, uint32_t generation, Bytes body) noexcept {
+bool Context::send_frame(Context& ctx, uint32_t generation, Bytes body) noexcept {
     FrameMessage msg{};
     msg.generation = generation;
     msg.len = static_cast<uint16_t>(body.size());
@@ -71,7 +73,7 @@ bool send_frame(Context& ctx, uint32_t generation, Bytes body) noexcept {
  * @param encrypt 是否加密（RPC 跟随 `enable_encryption`；握手/Ping/Pong 永不加密）
  * @note PM 头的 len 保存**加密前的明文长度**，这是与上游互通的关键。
  */
-bool send_control_frame(Context& ctx, uint32_t generation, PacketType type, uint32_t from_peer,
+bool Context::send_control_frame(Context& ctx, uint32_t generation, PacketType type, uint32_t from_peer,
                         uint32_t to_peer, Bytes plain, bool encrypt) noexcept {
     if (plain.size() > kMaxPlainPayload) {
         ctx.dropped.fetch_add(1);
@@ -119,7 +121,7 @@ bool send_control_frame(Context& ctx, uint32_t generation, PacketType type, uint
  * @param put_in_rpc_body 为 true 时 content 表示"RpcPacket.body 的原始内容"
  *        （即已编码的 RpcRequest/RpcResponse）
  */
-bool send_rpc_message(Context& ctx, uint32_t generation, const RpcSendTemplate& tmpl,
+bool Context::send_rpc_message(Context& ctx, uint32_t generation, const RpcSendTemplate& tmpl,
                       Bytes content) noexcept {
     RpcPlan plan;
     if (!plan_rpc_slices(tmpl, content.size(), plan)) {
@@ -152,7 +154,7 @@ bool send_rpc_message(Context& ctx, uint32_t generation, const RpcSendTemplate& 
  * @brief 要求 I/O 断开并重连某个槽。
  * @param generation 该槽当前的会话代际（I/O 任务据此定位槽位）
  */
-void request_reconnect(Context& ctx, uint32_t generation) noexcept {
+void Context::request_reconnect(Context& ctx, uint32_t generation) noexcept {
     SmallMessage msg{};
     msg.kind = static_cast<uint8_t>(IoCommand::Reconnect);
     msg.generation = generation;
@@ -165,7 +167,7 @@ void request_reconnect(Context& ctx, uint32_t generation) noexcept {
  * @brief 由会话代际反查该连接的对端 peer id。
  * @details 代际由全局计数器分配，因此一个代际唯一对应一个连接槽。
  */
-uint32_t peer_of_generation(const Context& ctx, uint32_t generation) noexcept {
+uint32_t Context::peer_of_generation(const Context& ctx, uint32_t generation) noexcept {
     for (size_t i = 0; i < kMaxConnSlots; ++i) {
         if (ctx.slots[i].generation.load() == generation) {
             return ctx.slots[i].peer_id.load();
@@ -183,7 +185,7 @@ uint32_t peer_of_generation(const Context& ctx, uint32_t generation) noexcept {
  *          无法判断组网其实已不可用。这里把状态切到 @ref State::Error 并在**曾经
  *          上报过 Ready** 时补发一次错误事件（避免每个 zstd 报文都刷事件）。
  */
-void revoke_ready(Context& ctx, esp_err_t err) noexcept {
+void Context::revoke_ready(Context& ctx, esp_err_t err) noexcept {
     ctx.set_error(err);
     ctx.dropped.fetch_add(1);
     if (ctx.network_ready_reported) {
@@ -194,7 +196,7 @@ void revoke_ready(Context& ctx, esp_err_t err) noexcept {
 }
 
 /** @brief 处理一个完整的 RPC 请求（目标为本机）。 */
-void handle_rpc_request(Context& ctx, uint32_t generation, const RpcPacketRef& packet,
+void Context::handle_rpc_request(Context& ctx, uint32_t generation, const RpcPacketRef& packet,
                         Bytes body) noexcept {
     const uint32_t my_peer_id = ctx.my_peer_id.load();
     if (packet.to_peer != my_peer_id) {
@@ -254,13 +256,13 @@ void handle_rpc_request(Context& ctx, uint32_t generation, const RpcPacketRef& p
  *          必须立即补发一次带拓扑的同步请求；压缩信息为 Zstd 时按不支持处理。
  */
 /** @brief 检查虚拟网段是否与物理网卡网段重叠（定义见下方）。 */
-bool physical_subnet_overlaps(uint32_t addr, uint8_t prefix) noexcept;
+static bool physical_subnet_overlaps(uint32_t addr, uint8_t prefix) noexcept;
 
 /**
  * @brief 发送一次同步请求（请求内容由 SyncEngine 构造）。
  * @param include_topology 是否携带本节点信息与邻接（首包与补发时为 true）
  */
-bool send_sync_request(Context& ctx, uint32_t generation, uint32_t remote_peer_id,
+bool Context::send_sync_request(Context& ctx, uint32_t generation, uint32_t remote_peer_id,
                        bool include_topology, uint32_t now) noexcept {
     const int64_t transaction_id =
         ctx.transactions.allocate(generation, remote_peer_id, now, kRpcTimeoutMs);
@@ -300,7 +302,7 @@ bool send_sync_request(Context& ctx, uint32_t generation, uint32_t remote_peer_i
  * @details 合并对端拓扑、收集 missing 列表并返回本节点会话信息；**响应本身不携带
  *          拓扑**，因此应答方还要主动发送自己的同步请求（由主循环触发）。
  */
-esp_err_t handle_ospf_sync(void* ctx_ptr, Bytes request, MutBytes response,
+esp_err_t Context::handle_ospf_sync(void* ctx_ptr, Bytes request, MutBytes response,
                            size_t& response_len) noexcept {
     auto& ctx = *static_cast<Context*>(ctx_ptr);
     response_len = 0;
@@ -314,7 +316,7 @@ esp_err_t handle_ospf_sync(void* ctx_ptr, Bytes request, MutBytes response,
 /**
  * @brief 把引擎当前的虚拟地址落到网卡上（创建或改址），并做物理网段重叠检查。
  */
-void sync_netif_address(Context& ctx) noexcept {
+void Context::sync_netif_address(Context& ctx) noexcept {
     const uint32_t address = ctx.sync.my_ipv4();
     const uint8_t prefix = ctx.sync.my_prefix();
     if (address == 0) {
@@ -354,7 +356,7 @@ void sync_netif_address(Context& ctx) noexcept {
  * @details 虚拟网段与物理局域网重叠会导致"本应走隧道的流量被物理网卡直接发出去"，
  *          因此创建网卡前必须拒绝。重叠判定使用物理 STA 网卡的当前 IP/掩码。
  */
-bool physical_subnet_overlaps(uint32_t addr, uint8_t prefix) noexcept {
+static bool physical_subnet_overlaps(uint32_t addr, uint8_t prefix) noexcept {
     esp_netif_t* sta = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
     if (sta == nullptr) {
         return false;  // 没有物理网卡（例如以太网或尚未初始化）：无法判定，放行
@@ -372,7 +374,7 @@ bool physical_subnet_overlaps(uint32_t addr, uint8_t prefix) noexcept {
     return ipv4_prefixes_overlap(addr, prefix, phys_ip, phys_prefix);
 }
 
-void handle_rpc_response(Context& ctx, uint32_t generation, const RpcPacketRef& packet,
+void Context::handle_rpc_response(Context& ctx, uint32_t generation, const RpcPacketRef& packet,
                          Bytes body) noexcept {
     if (!ctx.transactions.complete(packet.transaction_id, generation)) {
         ctx.dropped.fetch_add(1);  // 未知事务或旧代际的迟到响应
@@ -405,10 +407,8 @@ void handle_rpc_response(Context& ctx, uint32_t generation, const RpcPacketRef& 
     }
 }
 
-}  // namespace
-
 /** @brief 控制面任务主循环。 */
-void proto_task(void* arg) noexcept {
+void Context::proto_task(void* arg) noexcept {
     auto& ctx = *static_cast<Context*>(arg);
 
     HandshakeExpectation expect{};
@@ -776,8 +776,5 @@ void proto_task(void* arg) noexcept {
 }
 
 }  // namespace et
-
-/** @brief FreeRTOS 任务入口（C 链接）。 */
-extern "C" void et_proto_task_entry(void* arg) { et::proto_task(arg); }
 
 #endif  // ESP_PLATFORM

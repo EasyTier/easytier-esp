@@ -33,21 +33,8 @@ constexpr const char* kTag = "ET.IO";
 constexpr size_t kTxBudgetBytes = 8192;
 /// select 超时（毫秒），同时决定停止请求的响应延迟上限。
 constexpr uint32_t kSelectTimeoutMs = 20;
-/// 退避上限。
-constexpr uint32_t kMaxBackoffMs = 30000;
-/// 退避起点。
-constexpr uint32_t kInitialBackoffMs = 1000;
 /// 无连接可用时的轮询间隔（毫秒）。
 constexpr uint32_t kSliceDelayMs = 20;
-
-/** @brief 一个连接槽的 I/O 任务私有状态。 */
-struct SlotState {
-    size_t peer_index = 0;                        ///< 该槽当前使用的配置入口下标
-    uint32_t backoff_ms = kInitialBackoffMs;      ///< 该槽的重连退避
-    uint32_t retry_at_ms = 0;  ///< 独立重试截止时间，等待期间仍服务其它连接
-    bool connecting = false;                      ///< 是否正在非阻塞连接中
-    bool session_open = false;                    ///< 是否已建立过 TCP 会话
-};
 
 /** @brief 收到一帧时的回调上下文。 */
 struct FrameSink {
@@ -56,8 +43,10 @@ struct FrameSink {
     uint32_t generation = 0;  ///< 帧所属的连接代际
 };
 
+}  // namespace
+
 /** @brief 把槽的入口下标轮换到下一条（入口数为 0 时保持不变）。 */
-void advance_peer_index(const Context& ctx, size_t& index) noexcept {
+void Context::advance_peer_index(const Context& ctx, size_t& index) noexcept {
     const size_t count = ctx.settings.peers.size();
     index = count > 0 ? (index + 1) % count : 0;
 }
@@ -66,7 +55,7 @@ void advance_peer_index(const Context& ctx, size_t& index) noexcept {
  * @brief 安排一次重试并指数退避（封顶 @ref kMaxBackoffMs ）。
  * @return 本次实际等待的毫秒数，与 @p st.retry_at_ms 一致，便于日志打印准确值
  */
-uint32_t schedule_retry(SlotState& st) noexcept {
+static uint32_t schedule_retry(SlotState& st) noexcept {
     st.retry_at_ms = now_ms() + st.backoff_ms;
     const uint32_t delay = st.backoff_ms;
     st.backoff_ms = (st.backoff_ms >= kMaxBackoffMs) ? kMaxBackoffMs : st.backoff_ms * 2;
@@ -78,7 +67,7 @@ uint32_t schedule_retry(SlotState& st) noexcept {
  * @note 事件只带槽位与代际：对端 peer id 由控制面自己从 `ctx.slots[slot].peer_id`
  *       读取，避免同一条信息有两个真值来源。
  */
-void post_event(Context& ctx, IoEvent kind, uint8_t slot, uint32_t generation) noexcept {
+void Context::post_event(Context& ctx, IoEvent kind, uint8_t slot, uint32_t generation) noexcept {
     SmallMessage msg{};
     msg.kind = static_cast<uint8_t>(kind);
     msg.slot = slot;
@@ -94,7 +83,7 @@ void post_event(Context& ctx, IoEvent kind, uint8_t slot, uint32_t generation) n
  * @details 只"偷看"PM 头的 packet_type 一个字节做分流：Data 给数据面，其余给控制面。
  *          分流后各自的队列都有独立额度，数据洪泛不会挤掉握手/Ping/RPC。
  */
-void post_frame(void* arg, Bytes body) noexcept {
+void Context::post_frame(void* arg, Bytes body) noexcept {
     auto* sink = static_cast<FrameSink*>(arg);
     FrameMessage msg{};
     msg.generation = sink->generation;
@@ -113,7 +102,7 @@ void post_frame(void* arg, Bytes body) noexcept {
 }
 
 /** @brief 选择未被其它槽连接/连接中的入口；相同 host:port 只能占用一个槽。 */
-bool select_entry(const Context& ctx, const std::array<SlotState, kMaxConnSlots>& states,
+bool Context::select_entry(const Context& ctx, const std::array<SlotState, kMaxConnSlots>& states,
                    size_t slot, size_t& index) noexcept {
     const size_t count = ctx.settings.peers.size();
     for (size_t offset = 0; offset < count; ++offset) {
@@ -144,7 +133,7 @@ bool select_entry(const Context& ctx, const std::array<SlotState, kMaxConnSlots>
  *          帧带 to_peer，按目标对端选路且不校验代际（同一网络密钥下，重连后的密文
  *          依然有效，按 peer 选路更稳）。
  */
-bool frame_sendable(const FrameMessage& tx, uint32_t slot_generation,
+static bool frame_sendable(const FrameMessage& tx, uint32_t slot_generation,
                     uint32_t slot_peer_id) noexcept {
     if (tx.to_peer != 0) {
         return tx.to_peer == slot_peer_id;
@@ -156,7 +145,7 @@ bool frame_sendable(const FrameMessage& tx, uint32_t slot_generation,
 }
 
 /** @brief 关闭一个槽并上报断开（仅在确实建立过会话时上报）。 */
-void drop_slot(Context& ctx, size_t slot, SlotState& st) noexcept {
+void Context::drop_slot(Context& ctx, size_t slot, SlotState& st) noexcept {
     ConnSlot& conn_slot = ctx.slots[slot];
     const uint32_t generation = conn_slot.generation.load();
     if (conn_slot.conn != nullptr) {
@@ -180,7 +169,7 @@ void drop_slot(Context& ctx, size_t slot, SlotState& st) noexcept {
  *          背压）必须保留队头等下一轮，绝不能丢；只有"根本没有任何槽匹配该帧"（目标
  *          连接不存在或代际已过期）才丢弃，否则会阻塞整个队列。
  */
-void pump_tx(Context& ctx, std::array<SlotState, kMaxConnSlots>& states) noexcept {
+void Context::pump_tx(Context& ctx, std::array<SlotState, kMaxConnSlots>& states) noexcept {
     FrameMessage tx{};
     while (xQueuePeek(ctx.q_tx, &tx, 0) == pdTRUE) {
         bool matched = false;  ///< 是否有槽"认领"了这帧（即使暂时忙）
@@ -222,10 +211,8 @@ void pump_tx(Context& ctx, std::array<SlotState, kMaxConnSlots>& states) noexcep
     }
 }
 
-}  // namespace
-
 /** @brief I/O 任务主循环。 */
-void io_task(void* arg) noexcept {
+void Context::io_task(void* arg) noexcept {
     auto& ctx = *static_cast<Context*>(arg);
     const size_t peer_count = ctx.settings.peers.size();
     std::array<SlotState, kMaxConnSlots> states{};
@@ -438,8 +425,5 @@ void io_task(void* arg) noexcept {
 }
 
 }  // namespace et
-
-/** @brief FreeRTOS 任务入口（C 链接）。 */
-extern "C" void et_io_task_entry(void* arg) { et::io_task(arg); }
 
 #endif  // ESP_PLATFORM

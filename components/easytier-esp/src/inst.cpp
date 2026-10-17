@@ -12,7 +12,10 @@
  * 组件内**没有**全局单实例状态：每个 Inst 独占自己的 Settings 与 Context，因此可以
  * 同时存在多个实例（内存与任务数按实例叠加）。
  */
+#include <array>
+#include <cstdio>
 #include <new>
+#include <string_view>
 
 #include "context.h"
 #include "config/config.hpp"
@@ -24,6 +27,16 @@ namespace et {
 namespace {
 
 constexpr const char* kTag = "ET.INSTANCE";
+
+/** @brief 把文本视图拷进定长快照缓冲（截断但保证 NUL 结尾）。 */
+template <size_t N>
+void copy_text(std::array<char, N>& dst, std::string_view src) noexcept {
+    const size_t n = src.size() < N - 1 ? src.size() : N - 1;
+    for (size_t i = 0; i < n; ++i) {
+        dst[i] = src[i];
+    }
+    dst[n] = '\0';
+}
 
 /**
  * @brief 离开作用域时清除局部 @ref Settings 副本里的网络密钥。
@@ -58,14 +71,13 @@ Inst::Inst(std::string_view toml, const RuntimeOptions& options) noexcept {
         return;
     }
     // 运行上下文 92,808 B ≈ 91 KiB。未启用 PSRAM 时可能分配失败，这里给出明确提示。
-    ctx_ = new (std::nothrow) Context();
+    ctx_ = new (std::nothrow) Context(settings, options);
     if (ctx_ == nullptr) {
         ET_LOGE(kTag, "context allocation failed (%u bytes); enable PSRAM or shrink buffers",
                 static_cast<unsigned>(sizeof(Context)));
         last_error_ = ESP_ERR_NO_MEM;
         return;
     }
-    ctx_->prepare(settings, options);
     last_error_ = ESP_OK;
 }
 
@@ -93,7 +105,15 @@ esp_err_t Inst::get_status(Status& out) const noexcept {
     if (ctx_ == nullptr) {
         return ESP_ERR_INVALID_STATE;
     }
-    ctx_->get_status(out);
+    // 友元读取 Context 的原子状态，逐字段拷贝，保证快照自洽。
+    out.state = ctx_->state.load();
+    out.peer_id = ctx_->my_peer_id.load();
+    out.virtual_ipv4 = ctx_->my_ipv4.load();
+    out.prefix_len = ctx_->my_prefix.load();
+    out.direct_peer_count = ctx_->direct_peers.load();
+    out.reachable_route_count = ctx_->reachable_routes.load();
+    out.last_error = ctx_->last_error.load();
+    out.dropped_packets = ctx_->dropped.load();
     return ESP_OK;
 }
 
@@ -101,7 +121,37 @@ esp_err_t Inst::get_config_info(ConfigInfo& out) const noexcept {
     if (ctx_ == nullptr) {
         return ESP_ERR_INVALID_STATE;
     }
-    ctx_->get_config_info(out);
+    // 友元读取 Context 里不可变的设置，生成定长快照（不含网络密钥）。
+    const Settings& cfg = ctx_->settings;
+    out = ConfigInfo{};
+    copy_text(out.instance_name, cfg.instance_name);
+    copy_text(out.hostname, cfg.hostname);
+    copy_text(out.network_name, cfg.network_name);
+    format_uuid_text(cfg.instance_id.data(), out.instance_id.data());
+    out.peer_total_count = cfg.peers.size();
+    out.peer_count = cfg.peers.size() > out.peers.size() ? out.peers.size() : cfg.peers.size();
+    out.peers_truncated = cfg.peers.size() > out.peer_count;
+    for (size_t i = 0; i < out.peer_count; ++i) {
+        // 主机名最长 255 字节而缓冲 200：用精度限长，避免编译期截断告警。
+        (void)snprintf(out.peers[i].text.data(), out.peers[i].text.size(), "%.180s:%u",
+                       cfg.peers[i].host.c_str(), static_cast<unsigned>(cfg.peers[i].port));
+    }
+    out.has_static_ipv4 = cfg.has_static_ipv4;
+    out.static_ipv4 = cfg.static_ipv4;
+    out.static_prefix = cfg.static_prefix;
+    out.dhcp = cfg.dhcp;
+    if (cfg.dhcp) {
+        const uint32_t subnet = cfg.dhcp_subnet_or_default();
+        (void)snprintf(out.dhcp_subnet.data(), out.dhcp_subnet.size(), "%u.%u.%u.%u/%u",
+                       static_cast<unsigned>((subnet >> 24) & 0xFF),
+                       static_cast<unsigned>((subnet >> 16) & 0xFF),
+                       static_cast<unsigned>((subnet >> 8) & 0xFF),
+                       static_cast<unsigned>(subnet & 0xFF),
+                       static_cast<unsigned>(cfg.dhcp_has_subnet ? cfg.dhcp_prefix
+                                                                 : kDefaultDhcpPrefix));
+    }
+    out.enable_encryption = cfg.enable_encryption;
+    out.mtu = cfg.mtu;
     return ESP_OK;
 }
 

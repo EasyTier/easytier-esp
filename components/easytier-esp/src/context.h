@@ -7,7 +7,9 @@
  *   跨任务只通过队列传递数据、通过原子量传递状态；
  * - **有界资源**：队列和缓冲都是编译期固定容量，运行期不做无界分配；
  * - **代际（generation）**：每次新建连接都会递增，旧代际的收发数据一律丢弃，
- *   从而避免 fd 复用或旧数据串到新连接上。
+ *   从而避免 fd 复用或旧数据串到新连接上；
+ * - **封装**：全部状态与资源都是 private；只有 @ref et::Inst 通过友元读取快照，
+ *   任务实现本身是 @ref Context 的私有静态成员（定义在 tasks 目录的 *_task.cpp）。
  */
 #pragma once
 
@@ -92,27 +94,47 @@ struct SmallMessage {
     uint8_t slot = 0;         ///< 涉及的连接槽（0..kMaxConnSlots-1）
     uint32_t generation = 0;  ///< 连接代际（事件使用）
 };
+
+/// I/O 任务重连退避起点（毫秒）。
+inline constexpr uint32_t kInitialBackoffMs = 1000;
+/// I/O 任务重连退避上限（毫秒）。
+inline constexpr uint32_t kMaxBackoffMs = 30000;
+
+/** @brief 一个连接槽的 I/O 任务私有状态（仅 I/O 任务访问）。 */
+struct SlotState {
+    size_t peer_index = 0;                        ///< 该槽当前使用的配置入口下标
+    uint32_t backoff_ms = kInitialBackoffMs;      ///< 该槽的重连退避
+    uint32_t retry_at_ms = 0;  ///< 独立重试截止时间，等待期间仍服务其它连接
+    bool connecting = false;                      ///< 是否正在非阻塞连接中
+    bool session_open = false;                    ///< 是否已建立过 TCP 会话
+};
 #endif
 
 /**
  * @brief 组件运行上下文（RAII：持有队列/任务/连接/AEAD/虚拟网卡与密钥）。
  *
- * @details 生命周期由 @ref et::Inst 驱动：
+ * @details 生命周期：
  * @code
- * Context ctx;                      // 只分配内存，不创建任何资源
- * ctx.prepare(settings, options);   // 拷贝设置、派生密钥、随机 peer id
+ * Context ctx(settings, options);   // 拷贝设置、派生密钥、随机 peer id（不建资源）
  * ctx.start();                      // 建队列 / AEAD / TcpConn / 任务
  * ...
  * ctx.stop(5000);                   // 等任务退出（可超时）
  * // 析构：若仍在运行则无限等待，再释放资源并清零密钥
  * @endcode
  *
- * 数据成员对同组件的任务公开（任务通过 @c ctx.xxx 直接访问），但生命周期方法只应由
- * 实例持有者串行调用。多个实例各持一份，互不共享。
+ * 全部数据成员都是 private：任务实现作为 @ref Context 的私有静态成员（定义在
+ * tasks 目录的 `*_task.cpp`）直接访问；@ref et::Inst 通过友元读取状态/配置快照。
+ * 多个实例各持一份，互不共享。
  */
 class Context final {
 public:
-    Context() noexcept = default;
+    /**
+     * @brief 构造并准备上下文：拷贝设置与运行选项、派生密钥/摘要、生成随机 peer id。
+     * @note 不创建任何运行资源（队列/任务在 @ref start 中创建）。设置文本的深拷贝在
+     *       分配失败时按组件约定终止进程（-fno-exceptions），因此没有错误码。
+     */
+    Context(const Settings& new_settings, const RuntimeOptions& new_options) noexcept;
+
     /** @brief 析构：若仍在运行则无限等待停止，然后释放全部资源并清零密钥。 */
     ~Context() noexcept;
 
@@ -120,12 +142,6 @@ public:
     Context& operator=(const Context&) = delete;
     Context(Context&&) = delete;
     Context& operator=(Context&&) = delete;
-
-    /**
-     * @brief 准备上下文：拷贝设置与运行选项、派生密钥/摘要、生成随机 peer id。
-     * @note 不创建任何运行资源；重复调用会覆盖上一次的准备结果（要求尚未 start）。
-     */
-    void prepare(const Settings& new_settings, const RuntimeOptions& new_options) noexcept;
 
     /**
      * @brief 启动：创建队列/AEAD/TcpConn/虚拟网卡与三个任务。
@@ -144,19 +160,101 @@ public:
     /** @brief 通知物理网络是否就绪（非阻塞入队；未启动返回 @c ESP_ERR_INVALID_STATE）。 */
     esp_err_t set_underlay_ready(bool ready) noexcept;
 
-    /** @brief 是否已 @ref start 。 */
-    [[nodiscard]] bool started() const noexcept { return started_; }
+private:
+    friend class Inst;  ///< 公共快照（get_status/get_config_info）由 Inst 直接读取
 
-    /** @brief 拷贝状态快照。 */
-    void get_status(Status& out) const noexcept;
-    /** @brief 拷贝生效配置快照（不含网络密钥）。 */
-    void get_config_info(ConfigInfo& out) const noexcept;
+#if defined(ESP_PLATFORM)
+    // ---- 任务实现（定义在 tasks 目录的 *_task.cpp）--------------------------------------
+    static void io_task(void* arg) noexcept;     ///< I/O 任务主循环
+    static void proto_task(void* arg) noexcept;  ///< 控制面任务主循环
+    static void data_task(void* arg) noexcept;   ///< 数据面任务主循环
 
-    Settings settings{};                ///< 校验后的生效设置（准备后不可变）
+    // I/O 任务
+    static void advance_peer_index(const Context& ctx, size_t& index) noexcept;
+    static void post_event(Context& ctx, IoEvent kind, uint8_t slot, uint32_t generation) noexcept;
+    static void post_frame(void* arg, Bytes body) noexcept;
+    static bool select_entry(const Context& ctx,
+                             const std::array<SlotState, kMaxConnSlots>& states, size_t slot,
+                             size_t& index) noexcept;
+    static void drop_slot(Context& ctx, size_t slot, SlotState& st) noexcept;
+    static void pump_tx(Context& ctx, std::array<SlotState, kMaxConnSlots>& states) noexcept;
+
+    // 控制面任务
+    static bool send_frame(Context& ctx, uint32_t generation, Bytes body) noexcept;
+    static bool send_control_frame(Context& ctx, uint32_t generation, PacketType type,
+                                  uint32_t from_peer, uint32_t to_peer, Bytes plain,
+                                  bool encrypt) noexcept;
+    static bool send_rpc_message(Context& ctx, uint32_t generation, const RpcSendTemplate& tmpl,
+                                 Bytes content) noexcept;
+    static void request_reconnect(Context& ctx, uint32_t generation) noexcept;
+    static uint32_t peer_of_generation(const Context& ctx, uint32_t generation) noexcept;
+    static void revoke_ready(Context& ctx, esp_err_t err) noexcept;
+    static void handle_rpc_request(Context& ctx, uint32_t generation,
+                                   const RpcPacketRef& packet, Bytes body) noexcept;
+    static bool send_sync_request(Context& ctx, uint32_t generation, uint32_t remote_peer_id,
+                                  bool include_topology, uint32_t now) noexcept;
+    static esp_err_t handle_ospf_sync(void* ctx_ptr, Bytes request, MutBytes response,
+                                      size_t& response_len) noexcept;
+    static void sync_netif_address(Context& ctx) noexcept;
+    static void handle_rpc_response(Context& ctx, uint32_t generation,
+                                    const RpcPacketRef& packet, Bytes body) noexcept;
+
+    // 数据面任务
+    static void deliver_to_netif(Context& ctx, Bytes ip_packet) noexcept;
+    static void send_data_frame(Context& ctx, uint32_t generation, uint32_t to_peer,
+                                uint32_t next_hop, Bytes ip_packet) noexcept;
+    static void handle_netif_output(Context& ctx, const NetifRxItem& item) noexcept;
+    static void handle_inbound_data(Context& ctx, FrameMessage& frame) noexcept;
+#endif
+
+    /** @brief 记录一次错误（保留首个错误，便于定位根因）。 */
+    void set_error(esp_err_t err) noexcept {
+        if (err != ESP_OK) {
+            esp_err_t expected = ESP_OK;
+            (void)last_error.compare_exchange_strong(expected, err);
+        }
+    }
+
+    /** @brief 投递事件回调（仅控制面任务调用）。 */
+    void emit(EventType type, uint32_t peer_id = 0) noexcept {
+        if (options.on_event == nullptr) {
+            return;
+        }
+        Event event{};
+        event.type = type;
+        event.peer_id = peer_id;
+        // 事件里的状态必须与 Inst::get_status() 一致：虚拟地址取"当前实际生效"的地址
+        // （静态或 dhcp 分配结果），可达路由数取控制面发布的最新值。早期版本这里
+        // 回显配置里的静态地址并把路由数写死为 0，导致 dhcp 节点的 NetworkReady
+        // 事件里虚拟地址为 0，接入方据此判断会出错。
+        event.status.state = state.load();
+        event.status.peer_id = my_peer_id.load();
+        event.status.virtual_ipv4 = my_ipv4.load();
+        event.status.prefix_len = my_prefix.load();
+        event.status.direct_peer_count = direct_peers.load();
+        event.status.reachable_route_count = reachable_routes.load();
+        event.status.last_error = last_error.load();
+        event.status.dropped_packets = dropped.load();
+        options.on_event(event, options.user_data);
+    }
+
+    /** @brief 创建队列/AEAD/TcpConn/网卡与任务；失败时由调用方回滚。 */
+    esp_err_t create_runtime() noexcept;
+    /** @brief 释放队列/连接/AEAD/网卡（可重复调用；析构与 start 失败回滚共用）。 */
+    void release_runtime() noexcept;
+    /**
+     * @brief 等待三个任务确认退出。
+     * @param timeout_ms 等待上限；@c UINT32_MAX 表示无限等待（析构路径使用）。
+     */
+    bool wait_tasks(uint32_t timeout_ms) noexcept;
+
+    // ---- 设置与密钥 -------------------------------------------------------
+    Settings settings{};                ///< 校验后的生效设置（构造后不可变）
     RuntimeOptions options{};           ///< 事件回调等运行期选项
     std::array<uint8_t, 16> key{};      ///< 派生的 AES-128 密钥
     std::array<uint8_t, 32> digest{};   ///< 网络密钥摘要
 
+    // ---- 共享状态（原子量，跨任务读取）------------------------------------
     std::atomic<State> state{State::Uninitialized};   ///< 当前状态
     std::atomic<bool> underlay_ready{false};          ///< 物理网络是否就绪
     std::atomic<bool> stop_requested{false};          ///< 停止请求
@@ -210,6 +308,7 @@ public:
     uint32_t netif_ip = 0;         ///< 网卡当前地址（用于判断是否需要更新）
 
 #if defined(ESP_PLATFORM)
+    // ---- 队列与任务句柄 ---------------------------------------------------
     QueueHandle_t q_rx_ctrl = nullptr;  ///< I/O → 控制面：收到的帧
     QueueHandle_t q_tx = nullptr;       ///< 控制面 → I/O：待发送的帧
     QueueHandle_t q_evt = nullptr;      ///< I/O → 控制面：连接事件
@@ -228,65 +327,7 @@ public:
     std::array<ConnSlot, kMaxConnSlots> slots{};
 #endif
 
-    /** @brief 记录一次错误（保留首个错误，便于定位根因）。 */
-    void set_error(esp_err_t err) noexcept {
-        if (err != ESP_OK) {
-            esp_err_t expected = ESP_OK;
-            (void)last_error.compare_exchange_strong(expected, err);
-        }
-    }
-
-    /** @brief 投递事件回调（仅控制面任务调用）。 */
-    void emit(EventType type, uint32_t peer_id = 0) noexcept {
-        if (options.on_event == nullptr) {
-            return;
-        }
-        Event event{};
-        event.type = type;
-        event.peer_id = peer_id;
-        // 事件里的状态必须与 get_status() 一致：虚拟地址取"当前实际生效"的地址
-        // （静态或 dhcp 分配结果），可达路由数取控制面发布的最新值。早期版本这里
-        // 回显配置里的静态地址并把路由数写死为 0，导致 dhcp 节点的 NetworkReady
-        // 事件里虚拟地址为 0，接入方据此判断会出错。
-        event.status.state = state.load();
-        event.status.peer_id = my_peer_id.load();
-        event.status.virtual_ipv4 = my_ipv4.load();
-        event.status.prefix_len = my_prefix.load();
-        event.status.direct_peer_count = direct_peers.load();
-        event.status.reachable_route_count = reachable_routes.load();
-        event.status.last_error = last_error.load();
-        event.status.dropped_packets = dropped.load();
-        options.on_event(event, options.user_data);
-    }
-
-private:
-    /** @brief 创建队列/AEAD/TcpConn/网卡与任务；失败时由调用方回滚。 */
-    esp_err_t create_runtime() noexcept;
-    /** @brief 释放队列/连接/AEAD/网卡（可重复调用；析构与 start 失败回滚共用）。 */
-    void release_runtime() noexcept;
-    /**
-     * @brief 等待三个任务确认退出。
-     * @param timeout_ms 等待上限；@c UINT32_MAX 表示无限等待（析构路径使用）。
-     */
-    bool wait_tasks(uint32_t timeout_ms) noexcept;
-
     bool started_ = false;  ///< 是否已 start()
 };
-
-#if defined(ESP_PLATFORM)
-/** @brief I/O 任务入口（C++ 实现见 tasks/io_task.cpp）。 */
-void io_task(void* arg) noexcept;
-/** @brief 控制面任务入口（C++ 实现见 tasks/proto_task.cpp）。 */
-void proto_task(void* arg) noexcept;
-/** @brief 数据面任务入口（C++ 实现见 tasks/data_task.cpp）。 */
-void data_task(void* arg) noexcept;
-
-/** @brief FreeRTOS 任务入口包装（xTaskCreate 需要 C 函数指针）。 */
-extern "C" void et_io_task_entry(void* arg);
-/** @brief FreeRTOS 任务入口包装（xTaskCreate 需要 C 函数指针）。 */
-extern "C" void et_proto_task_entry(void* arg);
-/** @brief FreeRTOS 任务入口包装（xTaskCreate 需要 C 函数指针）。 */
-extern "C" void et_data_task_entry(void* arg);
-#endif
 
 }  // namespace et

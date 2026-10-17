@@ -36,8 +36,10 @@ static_assert(kLoopDelayTicks > 0);
 /// 单个 IP 报文的最大长度（虚拟 MTU 上限 1380，留出余量）。
 constexpr size_t kMaxIpPacket = 1600;
 
+}  // namespace
+
 /** @brief 投递一个 IP 报文到 lwIP（成功后 pbuf 所有权归 TCPIP 线程）。 */
-void deliver_to_netif(Context& ctx, Bytes ip_packet) noexcept {
+void Context::deliver_to_netif(Context& ctx, Bytes ip_packet) noexcept {
     if (!ctx.netif_created || ip_packet.empty()) {
         ctx.dropped.fetch_add(1);
         return;
@@ -66,7 +68,7 @@ void deliver_to_netif(Context& ctx, Bytes ip_packet) noexcept {
  * @note 与上游一致：`enable_encryption=false` 时既不加 AEAD 尾也不置加密位。
  *       PM 头的 len 始终保存**明文** IP 报文长度。
  */
-void send_data_frame(Context& ctx, uint32_t generation, uint32_t to_peer, uint32_t next_hop,
+void Context::send_data_frame(Context& ctx, uint32_t generation, uint32_t to_peer, uint32_t next_hop,
                      Bytes ip_packet) noexcept {
     uint8_t frame[kPeerManagerHeaderSize + kMaxIpPacket + kAeadTailSize];
     if (kPeerManagerHeaderSize + ip_packet.size() > sizeof(frame)) {
@@ -118,7 +120,7 @@ void send_data_frame(Context& ctx, uint32_t generation, uint32_t to_peer, uint32
 }
 
 /** @brief 处理 netif 出站 pbuf（来自 TCPIP 线程的队列）。 */
-void handle_netif_output(Context& ctx, const NetifRxItem& item) noexcept {
+void Context::handle_netif_output(Context& ctx, const NetifRxItem& item) noexcept {
     if (item.p == nullptr) {
         return;
     }
@@ -163,7 +165,7 @@ void handle_netif_output(Context& ctx, const NetifRxItem& item) noexcept {
 }
 
 /** @brief 处理入站 Data 帧：本机投递或按下一跳转发。 */
-void handle_inbound_data(Context& ctx, FrameMessage& frame) noexcept {
+void Context::handle_inbound_data(Context& ctx, FrameMessage& frame) noexcept {
     PeerManagerHeader hdr{};
     if (!decode_peer_manager_header(Bytes(frame.data.data(), kPeerManagerHeaderSize), hdr)) {
         ctx.dropped.fetch_add(1);
@@ -216,10 +218,8 @@ void handle_inbound_data(Context& ctx, FrameMessage& frame) noexcept {
     ctx.dropped.fetch_add(1);  // 无路由或非法报文
 }
 
-}  // namespace
-
 /** @brief 数据面任务主循环。 */
-void data_task(void* arg) noexcept {
+void Context::data_task(void* arg) noexcept {
     auto& ctx = *static_cast<Context*>(arg);
 
     while (!ctx.stop_requested.load()) {
@@ -252,8 +252,5 @@ void data_task(void* arg) noexcept {
 }
 
 }  // namespace et
-
-/** @brief FreeRTOS 任务入口（C 链接）。 */
-extern "C" void et_data_task_entry(void* arg) { et::data_task(arg); }
 
 #endif  // ESP_PLATFORM

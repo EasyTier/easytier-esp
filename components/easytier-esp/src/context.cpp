@@ -4,7 +4,7 @@
  *
  * @details 生命周期：
  * @code
- * prepare(settings, options) → 拷贝设置、派生密钥、随机 peer id（不创建任务）
+ * Context(settings, options) → 拷贝设置、派生密钥、随机 peer id（不创建资源）
  * start()                    → 建队列 / AEAD / TcpConn / 网卡 / 任务
  * stop(timeout)              → 置停止标志、等待任务确认退出（可超时）
  * ~Context()                 → 若仍在运行则无限等待停止，再释放资源并清零密钥
@@ -14,13 +14,8 @@
  */
 #include "context.h"
 
-#include <array>
-#include <cstdio>
 #include <new>
-#include <string_view>
 
-#include "config/config.hpp"
-#include "config/settings.hpp"
 #include "crypto/kdf.hpp"
 #include "support/config_limits.hpp"
 #include "support/log.hpp"
@@ -69,28 +64,16 @@ constexpr uint32_t kDataTaskStack = 8192;
 constexpr UBaseType_t kDataTaskPriority = 7;
 #endif
 
-/** @brief 把文本视图拷进定长诊断缓冲（截断但保证 NUL 结尾）。 */
-template <size_t N>
-void copy_text(std::array<char, N>& dst, std::string_view src) noexcept {
-    const size_t n = src.size() < N - 1 ? src.size() : N - 1;
-    for (size_t i = 0; i < n; ++i) {
-        dst[i] = src[i];
-    }
-    dst[n] = '\0';
-}
-
 }  // namespace
 
-/** @brief 准备上下文：拷贝设置/运行选项、派生密钥与摘要、生成随机 peer id。 */
-void Context::prepare(const Settings& new_settings, const RuntimeOptions& new_options) noexcept {
-    settings = new_settings;
-    options = new_options;
+/** @brief 构造并准备上下文：拷贝设置/运行选项、派生密钥与摘要、生成随机 peer id。 */
+Context::Context(const Settings& new_settings, const RuntimeOptions& new_options) noexcept
+    : settings(new_settings), options(new_options) {
     key = derive_key_128(settings.network_secret);
     digest = secret_digest(settings.network_name, settings.network_secret);
     const uint32_t peer_id = random_u32();
     my_peer_id.store(peer_id == 0 ? 1u : peer_id);
     state.store(State::Stopped);
-    started_ = false;
 }
 
 /** @brief 启动：创建运行资源与任务；失败时回滚并置 Error 状态。 */
@@ -160,52 +143,6 @@ esp_err_t Context::set_underlay_ready(bool ready) noexcept {
     (void)ready;
     return ESP_ERR_NOT_SUPPORTED;
 #endif
-}
-
-/** @brief 拷贝状态快照。 */
-void Context::get_status(Status& out) const noexcept {
-    out.state = state.load();
-    out.peer_id = my_peer_id.load();
-    out.virtual_ipv4 = my_ipv4.load();
-    out.prefix_len = my_prefix.load();
-    out.direct_peer_count = direct_peers.load();
-    out.reachable_route_count = reachable_routes.load();
-    out.last_error = last_error.load();
-    out.dropped_packets = dropped.load();
-}
-
-/** @brief 拷贝生效配置快照（不含网络密钥）。 */
-void Context::get_config_info(ConfigInfo& out) const noexcept {
-    const Settings& cfg = settings;
-    out = ConfigInfo{};
-    copy_text(out.instance_name, cfg.instance_name);
-    copy_text(out.hostname, cfg.hostname);
-    copy_text(out.network_name, cfg.network_name);
-    format_uuid_text(cfg.instance_id.data(), out.instance_id.data());
-    out.peer_total_count = cfg.peers.size();
-    out.peer_count = cfg.peers.size() > out.peers.size() ? out.peers.size() : cfg.peers.size();
-    out.peers_truncated = cfg.peers.size() > out.peer_count;
-    for (size_t i = 0; i < out.peer_count; ++i) {
-        // 主机名最长 255 字节而缓冲 200：用精度限长，避免编译期截断告警。
-        (void)snprintf(out.peers[i].text.data(), out.peers[i].text.size(), "%.180s:%u",
-                       cfg.peers[i].host.c_str(), static_cast<unsigned>(cfg.peers[i].port));
-    }
-    out.has_static_ipv4 = cfg.has_static_ipv4;
-    out.static_ipv4 = cfg.static_ipv4;
-    out.static_prefix = cfg.static_prefix;
-    out.dhcp = cfg.dhcp;
-    if (cfg.dhcp) {
-        const uint32_t subnet = cfg.dhcp_subnet_or_default();
-        (void)snprintf(out.dhcp_subnet.data(), out.dhcp_subnet.size(), "%u.%u.%u.%u/%u",
-                       static_cast<unsigned>((subnet >> 24) & 0xFF),
-                       static_cast<unsigned>((subnet >> 16) & 0xFF),
-                       static_cast<unsigned>((subnet >> 8) & 0xFF),
-                       static_cast<unsigned>(subnet & 0xFF),
-                       static_cast<unsigned>(cfg.dhcp_has_subnet ? cfg.dhcp_prefix
-                                                                 : kDefaultDhcpPrefix));
-    }
-    out.enable_encryption = cfg.enable_encryption;
-    out.mtu = cfg.mtu;
 }
 
 /** @brief 析构：停止仍在运行的任务（无限等待），释放资源并清零密钥。 */
@@ -318,19 +255,19 @@ esp_err_t Context::create_runtime() noexcept {
         }
     }
 
-    if (xTaskCreate(et_io_task_entry, "et_io", kIoTaskStack, this, kIoTaskPriority,
+    if (xTaskCreate(&Context::io_task, "et_io", kIoTaskStack, this, kIoTaskPriority,
                     &io_task_handle) != pdPASS) {
         ET_LOGE(kTag, "cannot create et_io task (stack %u bytes)", kIoTaskStack);
         return ESP_ERR_NO_MEM;
     }
-    if (xTaskCreate(et_proto_task_entry, "et_proto", kProtoTaskStack, this, kProtoTaskPriority,
+    if (xTaskCreate(&Context::proto_task, "et_proto", kProtoTaskStack, this, kProtoTaskPriority,
                     &proto_task_handle) != pdPASS) {
         ET_LOGE(kTag, "cannot create et_proto task (stack %u bytes)", kProtoTaskStack);
         stop_requested.store(true);
         (void)xSemaphoreTake(task_exit, pdMS_TO_TICKS(1000));
         return ESP_ERR_NO_MEM;
     }
-    if (xTaskCreate(et_data_task_entry, "et_data", kDataTaskStack, this, kDataTaskPriority,
+    if (xTaskCreate(&Context::data_task, "et_data", kDataTaskStack, this, kDataTaskPriority,
                     &data_task_handle) != pdPASS) {
         ET_LOGE(kTag, "cannot create et_data task (stack %u bytes)", kDataTaskStack);
         stop_requested.store(true);
