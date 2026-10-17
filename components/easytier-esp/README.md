@@ -203,8 +203,8 @@ void start_easytier() {
                  options);
     if (!inst->valid()) { /* 看 inst->last_error() */ inst.reset(); return; }
     if (inst->start() != ESP_OK) { inst.reset(); return; }
-    // 物理网络取得 IP 后通知组件；断网时传 false。
-    (void)inst->set_underlay_ready(true);
+    // 物理网络取得 IP 后通知组件；断网时调用 disconnect()。
+    (void)inst->connect();
 }
 ```
 
@@ -214,7 +214,7 @@ void start_easytier() {
 
 ### 多实例
 
-- 多个 `et::Inst` 可同时运行，互不共享状态；每个实例各自调用 `start/set_underlay_ready/stop`。
+- 多个 `et::Inst` 可同时运行，互不共享状态；每个实例各自调用 `start/connect/disconnect/stop`。
 - 每个实例的常驻内存、任务栈与连接槽都独立计算，N 个实例线性叠加（见「内存预算」）。
 - 应用需自行避免**虚拟 IP / 虚拟网段冲突**：两个实例的虚拟地址或子网重叠会破坏路由。
 - `RuntimeOptions::user_data` 与事件回调属于各自实例，实例 `stop()` 返回后才可释放其 `user_data`。
@@ -258,17 +258,17 @@ tomlc17 自身以 "out of memory" 报错并映射为 `ESP_ERR_NO_MEM`。仍然�
 | --- | --- | --- | --- |
 | `inst.last_error` | 是 | 是 | 只读构造阶段的错误码 |
 | `inst.get_status` / `get_config_info` | 是 | 是 | 只读原子量 / 深拷贝 `Settings`，与实例无共享 |
-| `inst.set_underlay_ready` | 是 | 是 | 非阻塞（队列投递），物理网络事件里直接调用 |
+| `inst.connect` / `disconnect` | 是 | 是 | 非阻塞（队列投递），物理网络事件里直接调用 |
 | `et::Inst` 构造 | 仅初始化阶段（大栈任务，串行） | 否 | 解析 TOML 并分配约 91 KiB 上下文 |
 | `inst.start` / `stop` / 析构 | 同一任务串行 | **否** | 会等待组件任务退出 |
 
 - 同一实例的生命周期接口必须**串行**调用；不同实例互不影响。
 - 事件回调运行在**控制面任务（`et_proto`）**里且是同步回调，因此必须快速返回；在回调里
   调用 `stop()` 会等待该任务自身、最终以 `ESP_ERR_TIMEOUT` 返回，析构则会永久阻塞。
-  `get_status()`/`get_config_info()`/`set_underlay_ready()` 在回调里可安全调用。
+  `get_status()`/`get_config_info()`/`connect()`/`disconnect()` 在回调里可安全调用。
 - `stop()` 返回后任务已全部退出、不会再有任何回调，此时才可以释放 `user_data` 指向的对象。
 - 也可以直接销毁对象（析构自动停止并释放）；注意析构没有超时，必须确保不在回调中执行。
-- 示例应用遵循同样的约束：WiFi 事件里只调用非阻塞的 `set_underlay_ready()`，而把
+- 示例应用遵循同样的约束：WiFi 事件里只调用非阻塞的 `connect()`/`disconnect()`，而把
   `et::Inst` 构造 + `start()` 放在独立的 8 KiB 任务里执行
   （见 [`main/easytier_app.cpp`](../../main/easytier_app.cpp)）。
 

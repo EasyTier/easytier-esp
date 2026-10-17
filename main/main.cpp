@@ -52,7 +52,7 @@ void on_wifi_event(void*, esp_event_base_t base, int32_t id, void* data) {
         const auto* event = static_cast<const ip_event_got_ip_t*>(data);
         ESP_LOGI(kTag, "got ip: " IPSTR, IP2STR(&event->ip_info.ip));
         g_retry = 0;
-        // 首次调用会创建一次性组网启动任务；之后只补发 underlay 就绪。
+        // 首次调用会创建一次性组网启动任务；之后只再调用 connect()。
         easytier_app::on_ip_got();
     }
 }

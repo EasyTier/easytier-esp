@@ -158,7 +158,7 @@ struct Event {
  *
  * @warning 回调在控制面任务（`et_proto`）上下文中**同步**执行，必须快速返回；
  * 回调内可以调用 @ref Inst::get_status / @ref Inst::get_config_info /
- * @ref Inst::set_underlay_ready，但**禁止**调用会等待任务的 @ref Inst::stop 或
+ * @ref Inst::connect / @ref Inst::disconnect，但**禁止**调用会等待任务的 @ref Inst::stop 或
  * 析构该实例（会死锁），详见 @ref Inst 的"线程与回调约束"。
  * @param event 事件内容，仅在回调期间有效
  * @param user_data 注册时传入的用户上下文
@@ -212,7 +212,7 @@ class Context;
  *     return;
  * }
  * ESP_ERROR_CHECK(inst->start());
- * ESP_ERROR_CHECK(inst->set_underlay_ready(true));
+ * ESP_ERROR_CHECK(inst->connect());
  * // 退出前：可直接让对象析构（自动停止并释放），也可先显式 stop() 观察超时。
  * ESP_ERROR_CHECK(inst->stop());
  * inst.reset();
@@ -223,7 +223,7 @@ class Context;
  * | 接口 | 可从任意任务调用 | 允许在事件回调中调用 | 说明 |
  * | --- | --- | --- | --- |
  * | @ref get_status / @ref get_config_info / @ref last_error | 是 | 是 | 只读原子量 / 深拷贝设置，返回值与实例无共享 |
- * | @ref set_underlay_ready | 是 | 是 | 非阻塞（队列投递），物理网络事件里直接调用 |
+ * | @ref connect / @ref disconnect | 是 | 是 | 非阻塞（队列投递），物理网络事件里直接调用 |
  * | 构造 | 仅初始化阶段（大栈任务） | 否 | 会解析 TOML 并分配上下文 |
  * | @ref start / @ref stop / 析构 | 同一任务串行 | **否** | 会等待任务，见下方死锁说明 |
  *
@@ -234,7 +234,7 @@ class Context;
  *   因此在回调内调用会等待组件任务的接口都不安全：`stop()` 会等到超时并返回
  *   @c ESP_ERR_TIMEOUT（它等待的正是当前任务），析构则会**永久阻塞**。
  *   回调也**不要**长时间阻塞，否则会拖慢握手、保活与路由同步。
- * - `get_status()`/`get_config_info()`/`set_underlay_ready()` 都只读原子量或做零等待
+ * - `get_status()`/`get_config_info()`/`connect()`/`disconnect()` 都只读原子量或做零等待
  *   入队，因此**在回调内或任意任务中调用都安全**。
  * - `stop()` 正常返回后，任务已全部退出，**不会再产生任何事件回调**；此时才可释放
  *   @ref RuntimeOptions::user_data 指向的对象。
@@ -287,14 +287,27 @@ public:
     esp_err_t start() noexcept;
 
     /**
-     * @brief 通知组件物理网络（WiFi/以太网）是否可用。
+     * @brief 通知组件物理网络（WiFi/以太网）已可用，开始/恢复组网。
      *
-     * @details 该接口非阻塞、可从事件回调中调用。物理网络断开时组件会撤销
-     * 连接与路由，恢复后自动重连并重新同步。
-     * @param ready true 表示物理网络已就绪
-     * @return @c ESP_OK，或 @c ESP_ERR_INVALID_STATE、队列满错误
+     * @details 组件收到通知后才会连接入口节点、握手并同步路由；在调用它之前实例
+     *          一直停在 @ref State::WaitingUnderlay。该接口非阻塞、可从事件回调中
+     *          调用，可重复调用（幂等）。**WiFi 掉线重连后必须再次调用**，否则组件
+     *          会一直认为物理网络不可用。
+     * @return @c ESP_OK；@c ESP_ERR_INVALID_STATE（未 start 或构造失败）；
+     *         @c ESP_ERR_NO_MEM（内部命令队列满，稍后重试）
      */
-    esp_err_t set_underlay_ready(bool ready) noexcept;
+    esp_err_t connect() noexcept;
+
+    /**
+     * @brief 通知组件物理网络已断开，撤销组网连接与路由。
+     *
+     * @details 组件会立即关闭所有入口 TCP 连接、从拓扑/路由中移除对端并回到
+     *          @ref State::WaitingUnderlay；物理网络恢复后再调用 @ref connect。
+     *          非阻塞、可从事件回调中调用，可重复调用（幂等）。
+     * @return @c ESP_OK；@c ESP_ERR_INVALID_STATE（未 start 或构造失败）；
+     *         @c ESP_ERR_NO_MEM（内部命令队列满，稍后重试）
+     */
+    esp_err_t disconnect() noexcept;
 
     /**
      * @brief 读取状态快照。

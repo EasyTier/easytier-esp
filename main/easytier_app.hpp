@@ -29,8 +29,8 @@ namespace easytier_app {
  * @brief 通知物理网络已取得 IP。
  *
  * @details 首次调用创建一次性启动任务执行组网初始化；之后每次调用（WiFi 掉线重连后
- *          重新取得 IP）只补发一次 underlay 就绪 —— 少了这一步组件会一直停在
- *          @c underlay_ready=false ，永远不再连接入口（曾经的真实缺陷）。
+ *          重新取得 IP）只再调用一次 @c et::Inst::connect() —— 少了这一步组件会一直
+ *          停在 @c WaitingUnderlay ，永远不再连接入口（曾经的真实缺陷）。
  *
  * @note 可从 WiFi/IP 事件回调直接调用：只做 @c xTaskCreate 或零等待入队，立即返回。
  */

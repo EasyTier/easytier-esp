@@ -27,7 +27,7 @@ namespace {
 
 constexpr const char* kTag = "et_easytier";
 
-/// 组网是否已启动：区分"首次取得 IP，需要建任务"与"重连后重新取得 IP，只需补发 underlay"。
+/// 组网是否已启动：区分"首次取得 IP，需要建任务"与"重连后重新取得 IP，只需 connect()"。
 bool g_started = false;
 
 /**
@@ -50,7 +50,7 @@ extern const uint8_t easytier_toml_end[] asm("_binary_easytier_toml_end");
 /**
  * @brief 组件事件回调：只做打印，保持快速返回。
  * @note 回调在控制面任务（`et_proto`）上下文中同步执行，内部只允许调用
- *       get_status/get_config_info/set_underlay_ready 这类非阻塞接口。
+ *       get_status/get_config_info/connect/disconnect 这类非阻塞接口。
  */
 void on_easytier_event(const et::Event& event, void*) noexcept {
     switch (event.type) {
@@ -249,8 +249,8 @@ void start_easytier() {
 void start_task(void*) {
     start_easytier();
     if (g_started) {
-        // 通知组件物理网络就绪：此后组件才会连接入口节点。
-        (void)g_inst->set_underlay_ready(true);
+        // 通知组件物理网络已可用：此后组件才会连接入口节点。
+        (void)g_inst->connect();
     }
     vTaskDelete(nullptr);
 }
@@ -267,16 +267,16 @@ void on_ip_got() noexcept {
         }
         return;
     }
-    // WiFi 掉线重连后**必须重新**通知组件物理网络就绪，否则组件会一直停在
-    // underlay_ready=false，永远不再连接入口（曾经的真实缺陷）。
+    // WiFi 掉线重连后**必须重新** connect()，否则组件会一直停在
+    // WaitingUnderlay，永远不再连接入口（曾经的真实缺陷）。
     if (g_inst.has_value()) {
-        (void)g_inst->set_underlay_ready(true);
+        (void)g_inst->connect();
     }
 }
 
 void on_ip_lost() noexcept {
     if (g_started && g_inst.has_value()) {
-        (void)g_inst->set_underlay_ready(false);
+        (void)g_inst->disconnect();
     }
 }
 
