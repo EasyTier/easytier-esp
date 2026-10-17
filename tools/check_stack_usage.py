@@ -25,19 +25,22 @@ from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
 
 PROJECT = Path(__file__).resolve().parent.parent
-COMPONENT_DIR = PROJECT / "components" / "easytier-esp"
 BUILD_DIR = PROJECT / "build"
 ELF = BUILD_DIR / "easytier-esp.elf"
-CONTEXT_CPP = COMPONENT_DIR / "src" / "context.cpp"
+SDKCONFIG_H = BUILD_DIR / "config" / "sdkconfig.h"
 
-# 任务入口 → (调用图根函数, 栈大小常量名)。
+# 任务入口 → (调用图根函数, 栈大小的 Kconfig 符号)。
 #
 # 入口是 `xTaskCreate` 用的 static 适配器（`io_entry` 等），只做一次强制转换就转调
 # 非静态主循环；分析从主循环开始，再把适配器自身的帧加上去。
+# 栈大小由 Kconfig 配置，实际取值以构建生成的 sdkconfig.h 为准。
 TASK_ENTRIES = {
-    "et::Context::io_entry": ("et::Context::run_io", "kIoTaskStack"),
-    "et::Context::proto_entry": ("et::Context::run_proto", "kProtoTaskStack"),
-    "et::Context::data_entry": ("et::Context::run_data", "kDataTaskStack"),
+    "et::Context::io_entry": ("et::Context::run_io", "CONFIG_EASYTIER_ESP_IO_TASK_STACK"),
+    "et::Context::proto_entry": (
+        "et::Context::run_proto",
+        "CONFIG_EASYTIER_ESP_PROTO_TASK_STACK",
+    ),
+    "et::Context::data_entry": ("et::Context::run_data", "CONFIG_EASYTIER_ESP_DATA_TASK_STACK"),
 }
 
 # 每层函数调用的额外开销（返回地址 + 对齐等）的保守估计。
@@ -112,13 +115,15 @@ def demangle(names: Set[str]) -> Dict[str, str]:
 
 
 def read_declared_stacks() -> Dict[str, int]:
-    """从 context.cpp 读取各任务声明的栈大小（字节）。"""
-    text = CONTEXT_CPP.read_text()
+    """从构建生成的 sdkconfig.h 读取各任务的 Kconfig 栈大小（字节）。"""
+    if not SDKCONFIG_H.exists():
+        raise SystemExit(f"找不到 {SDKCONFIG_H}，请先构建")
+    text = SDKCONFIG_H.read_text()
     declared: Dict[str, int] = {}
-    for symbol, (_root, const) in TASK_ENTRIES.items():
-        match = re.search(rf"constexpr\s+uint32_t\s+{const}\s*=\s*(\d+)\s*;", text)
+    for symbol, (_root, config_name) in TASK_ENTRIES.items():
+        match = re.search(rf"^#define\s+{config_name}\s+(\d+)\s*$", text, re.M)
         if match is None:
-            raise SystemExit(f"context.cpp 中找不到 {const} 的定义")
+            raise SystemExit(f"sdkconfig.h 中找不到 {config_name}")
         declared[symbol] = int(match.group(1))
     return declared
 

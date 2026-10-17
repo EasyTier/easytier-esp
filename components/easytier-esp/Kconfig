@@ -43,6 +43,57 @@ menu "EasyTier-ESP"
         range 1 8
         default 2
 
+    menu "任务栈与优先级"
+
+        config EASYTIER_ESP_IO_TASK_STACK
+            int "I/O 任务栈（字节）"
+            range 2048 32768
+            default 6144
+            help
+                et_io 任务栈。它要容纳 select/切帧路径上的少量局部变量（大缓冲都在
+                Context 里），余量主要留给 FreeRTOS 上下文切换与日志调用。
+                每个实例各有一份。
+
+        config EASYTIER_ESP_PROTO_TASK_STACK
+            int "控制面任务栈（字节）"
+            range 4096 65536
+            default 10240
+            help
+                et_proto 任务栈。控制面里最大的栈帧是握手/路由同步主循环（约 4.6 KiB），
+                该默认值留有约 2 倍余量；改小前请先跑 tools/check_stack_usage.py。
+
+        config EASYTIER_ESP_DATA_TASK_STACK
+            int "数据面任务栈（字节）"
+            range 2048 32768
+            default 8192
+            help
+                et_data 任务栈。转发路径最坏链约 4.3 KiB，默认值留有余量。
+                每个实例各有一份。
+
+        config EASYTIER_ESP_IO_TASK_PRIORITY
+            int "I/O 任务优先级"
+            range 1 24
+            default 7
+            help
+                et_io 任务优先级。必须低于 WiFi 与 TCPIP 任务（ESP-IDF 默认约 23 / 18），
+                否则网络栈会被饿死；上限 24 来自 FreeRTOS configMAX_PRIORITIES=25。
+
+        config EASYTIER_ESP_PROTO_TASK_PRIORITY
+            int "控制面任务优先级"
+            range 1 24
+            default 5
+            help
+                et_proto 任务优先级。默认低于 I/O 任务，避免控制面抢占收发。
+
+        config EASYTIER_ESP_DATA_TASK_PRIORITY
+            int "数据面任务优先级"
+            range 1 24
+            default 7
+            help
+                et_data 任务优先级。默认与 I/O 任务同级；同样应低于 WiFi/TCPIP。
+
+    endmenu
+
     menu "队列深度"
 
         config EASYTIER_ESP_QUEUE_RX_CTRL_DEPTH

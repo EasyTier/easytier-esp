@@ -285,7 +285,16 @@ tomlc17 自身以 "out of memory" 报错并映射为 `ESP_ERR_NO_MEM`。仍然�
 | `EASYTIER_ESP_QUEUE_RX_DATA_DEPTH` | 8 | I/O → 数据面的 `q_rx_data` 深度（1..32，每元素约 2 KiB） |
 | `EASYTIER_ESP_QUEUE_SMALL_DEPTH` | 8 | 事件/命令队列 `q_evt`/`q_io_cmd`/`q_app_cmd` 共用深度（1..32） |
 | `EASYTIER_ESP_QUEUE_NETIF_DEPTH` | 16 | TCPIP → 数据面的 pbuf 队列 `q_netif_rx` 深度（1..64） |
+| `EASYTIER_ESP_IO_TASK_STACK` | 6144 | I/O 任务栈字节数（2048..32768） |
+| `EASYTIER_ESP_PROTO_TASK_STACK` | 10240 | 控制面任务栈字节数（4096..65536） |
+| `EASYTIER_ESP_DATA_TASK_STACK` | 8192 | 数据面任务栈字节数（2048..32768） |
+| `EASYTIER_ESP_IO_TASK_PRIORITY` | 7 | I/O 任务优先级（1..24，须低于 WiFi/TCPIP） |
+| `EASYTIER_ESP_PROTO_TASK_PRIORITY` | 5 | 控制面任务优先级（1..24） |
+| `EASYTIER_ESP_DATA_TASK_PRIORITY` | 7 | 数据面任务优先级（1..24） |
 
+> 任务栈与优先级在 **EasyTier-ESP → 任务栈与优先级** 菜单里；栈改小前先跑
+> `tools/check_stack_usage.py`（它按 sdkconfig 的实际取值校验）。
+>
 > 队列深度单列在 menuconfig 的 **EasyTier-ESP → 队列深度** 菜单里；每加深一格，
 > 帧队列就多占约 2 KiB 常驻堆内存（`q_snapshot` 固定深度 1，不提供选项）。
 > 旧版本的帧队列默认是 4，突发路由同步/RPC 下容易溢出（丢帧并计入 `dropped`），
@@ -309,7 +318,7 @@ tomlc17 自身以 "out of memory" 报错并映射为 `ESP_ERR_NO_MEM`。仍然�
 | 事件/命令队列 `q_evt`/`q_io_cmd`/`q_app_cmd` | 默认约 192 B | 深度各 8 × `SmallMessage` 8 B |
 | 网卡出站队列 `q_netif_rx` + 快照 `q_snapshot` | 默认约 0.7 KiB | `q_netif_rx` 深度 16 × `NetifRxItem` 8 B；`q_snapshot` 固定深度 1 |
 | `TcpConn`（堆） | 约 12 KiB × 连接数 | 每槽一份收发缓冲，槽数见 `EASYTIER_ESP_MAX_CONNECTED_PEERS`（默认 6） |
-| 任务栈 | 24 KiB | I/O 6 KiB + 控制面 10 KiB + 数据面 8 KiB |
+| 任务栈 | 默认 24 KiB | I/O 6 KiB + 控制面 10 KiB + 数据面 8 KiB（均可在 Kconfig「任务栈与优先级」调整） |
 | TOML 解析 | 按文本规模（瞬时） | 无固定预算；分配失败由解析器报 OOM，受语法树/深度限额约束 |
 
 因此**强烈建议启用 PSRAM**（menuconfig 打开 `CONFIG_SPIRAM`，大于 16 KiB 的分配会落到
@@ -336,8 +345,8 @@ idf.py -DEASYTIER_STACK_USAGE=ON build
 python3 tools/check_stack_usage.py
 ```
 
-用 `-fstack-usage` + ELF 调用图计算三个任务入口的最坏调用链，与声明的栈大小比较
-（当前：I/O 2496/6144、控制面 5744/10240、数据面 4272/8192 字节）。大缓冲一律放在
+用 `-fstack-usage` + ELF 调用图计算三个任务入口的最坏调用链，与 **sdkconfig 里实际配置的
+栈大小**比较（默认：I/O 2496/6144、控制面 5744/10240、数据面 4272/8192 字节）。大缓冲一律放在
 `Context`/`SyncEngine` 成员或堆上，任务栈上只保留小对象——这一点很容易在重构中被破坏，
 所以每次改动任务或缓冲后都应重跑该检查。
 

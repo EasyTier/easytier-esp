@@ -50,21 +50,6 @@ constexpr const char* kTag = "ET.CONTEXT";
 // 大于 16 KiB 的分配会落到 PSRAM）。新增缓冲时请同步更新本注释与 README 的内存表。
 static_assert(sizeof(Context) < 112 * 1024, "Context 常驻内存超出预算，请检查新增缓冲");
 
-#if defined(ESP_PLATFORM)
-/** @brief I/O 任务栈（字节）。 */
-constexpr uint32_t kIoTaskStack = 6144;
-/** @brief 控制面任务栈（字节）。 */
-constexpr uint32_t kProtoTaskStack = 10240;
-/** @brief I/O 任务优先级（低于 WiFi 与 TCPIP）。 */
-constexpr UBaseType_t kIoTaskPriority = 7;
-/** @brief 控制面任务优先级。 */
-constexpr UBaseType_t kProtoTaskPriority = 5;
-/** @brief 数据面任务栈（字节）。 */
-constexpr uint32_t kDataTaskStack = 8192;
-/** @brief 数据面任务优先级（与 I/O 任务同级，低于 WiFi/TCPIP）。 */
-constexpr UBaseType_t kDataTaskPriority = 7;
-#endif
-
 }  // namespace
 
 /** @brief 构造并准备上下文：拷贝设置/运行选项、派生密钥与摘要、生成随机 peer id。 */
@@ -253,20 +238,20 @@ esp_err_t Context::create_runtime() noexcept {
         }
     }
 
-    if (xTaskCreate(&Context::io_entry, "et_io", kIoTaskStack, this, kIoTaskPriority,
-                    nullptr) != pdPASS) {
+    if (xTaskCreate(&Context::io_entry, "et_io", kIoTaskStack, this,
+                    static_cast<UBaseType_t>(kIoTaskPriority), nullptr) != pdPASS) {
         ET_LOGE(kTag, "cannot create et_io task (stack %u bytes)", kIoTaskStack);
         return ESP_ERR_NO_MEM;
     }
-    if (xTaskCreate(&Context::proto_entry, "et_proto", kProtoTaskStack, this, kProtoTaskPriority,
-                    nullptr) != pdPASS) {
+    if (xTaskCreate(&Context::proto_entry, "et_proto", kProtoTaskStack, this,
+                    static_cast<UBaseType_t>(kProtoTaskPriority), nullptr) != pdPASS) {
         ET_LOGE(kTag, "cannot create et_proto task (stack %u bytes)", kProtoTaskStack);
         stop_requested.store(true);
         (void)xSemaphoreTake(task_exit, pdMS_TO_TICKS(1000));
         return ESP_ERR_NO_MEM;
     }
-    if (xTaskCreate(&Context::data_entry, "et_data", kDataTaskStack, this, kDataTaskPriority,
-                    nullptr) != pdPASS) {
+    if (xTaskCreate(&Context::data_entry, "et_data", kDataTaskStack, this,
+                    static_cast<UBaseType_t>(kDataTaskPriority), nullptr) != pdPASS) {
         ET_LOGE(kTag, "cannot create et_data task (stack %u bytes)", kDataTaskStack);
         stop_requested.store(true);
         for (int i = 0; i < 2; ++i) {

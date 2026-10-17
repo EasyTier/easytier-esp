@@ -79,6 +79,55 @@ inline constexpr size_t kQueueNetifDepth = 16;
 /** @brief 路由快照队列深度：固定 1（"只保留最新快照"的覆盖语义，不提供 Kconfig）。 */
 inline constexpr size_t kQueueSnapshotDepth = 1;
 
+// ---------------------------------------------------------------------------
+// 任务栈与优先级（Kconfig menu "任务栈与优先级"）
+//
+// 栈大小按字节计（IDF 的 xTaskCreate 栈深度单位就是字节）。宿主构建没有 sdkconfig，
+// 使用与 Kconfig 相同的默认值。
+// ---------------------------------------------------------------------------
+
+/** @brief I/O 任务栈（字节）。 */
+#if defined(CONFIG_EASYTIER_ESP_IO_TASK_STACK)
+inline constexpr uint32_t kIoTaskStack = CONFIG_EASYTIER_ESP_IO_TASK_STACK;
+#else
+inline constexpr uint32_t kIoTaskStack = 6144;
+#endif
+
+/** @brief 控制面任务栈（字节）。 */
+#if defined(CONFIG_EASYTIER_ESP_PROTO_TASK_STACK)
+inline constexpr uint32_t kProtoTaskStack = CONFIG_EASYTIER_ESP_PROTO_TASK_STACK;
+#else
+inline constexpr uint32_t kProtoTaskStack = 10240;
+#endif
+
+/** @brief 数据面任务栈（字节）。 */
+#if defined(CONFIG_EASYTIER_ESP_DATA_TASK_STACK)
+inline constexpr uint32_t kDataTaskStack = CONFIG_EASYTIER_ESP_DATA_TASK_STACK;
+#else
+inline constexpr uint32_t kDataTaskStack = 8192;
+#endif
+
+/** @brief I/O 任务优先级（FreeRTOS 优先级数，必须低于 WiFi/TCPIP）。 */
+#if defined(CONFIG_EASYTIER_ESP_IO_TASK_PRIORITY)
+inline constexpr uint32_t kIoTaskPriority = CONFIG_EASYTIER_ESP_IO_TASK_PRIORITY;
+#else
+inline constexpr uint32_t kIoTaskPriority = 7;
+#endif
+
+/** @brief 控制面任务优先级。 */
+#if defined(CONFIG_EASYTIER_ESP_PROTO_TASK_PRIORITY)
+inline constexpr uint32_t kProtoTaskPriority = CONFIG_EASYTIER_ESP_PROTO_TASK_PRIORITY;
+#else
+inline constexpr uint32_t kProtoTaskPriority = 5;
+#endif
+
+/** @brief 数据面任务优先级。 */
+#if defined(CONFIG_EASYTIER_ESP_DATA_TASK_PRIORITY)
+inline constexpr uint32_t kDataTaskPriority = CONFIG_EASYTIER_ESP_DATA_TASK_PRIORITY;
+#else
+inline constexpr uint32_t kDataTaskPriority = 7;
+#endif
+
 /** @brief TOML 语法树节点数上限。 */
 inline constexpr size_t kTomlMaxNodes = 1024;
 /** @brief 单个 TOML 数组的元素数上限。 */
@@ -109,5 +158,20 @@ static_assert(kQueueSmallDepth >= 1 && kQueueSmallDepth <= 32,
               "事件/命令队列深度必须落在 [1,32]");
 static_assert(kQueueNetifDepth >= 1 && kQueueNetifDepth <= 64,
               "q_netif_rx 深度必须落在 [1,64]");
+
+// 任务栈：太小会直接踩爆（编译期先挡一道），太大则白白吃内部 RAM。
+static_assert(kIoTaskStack >= 2048 && kIoTaskStack <= 32768,
+              "I/O 任务栈必须落在 [2048,32768] 字节");
+static_assert(kProtoTaskStack >= 4096 && kProtoTaskStack <= 65536,
+              "控制面任务栈必须落在 [4096,65536] 字节");
+static_assert(kDataTaskStack >= 2048 && kDataTaskStack <= 32768,
+              "数据面任务栈必须落在 [2048,32768] 字节");
+// 优先级上限 24 对应 FreeRTOS configMAX_PRIORITIES=25（0 保留给 IDLE）。
+static_assert(kIoTaskPriority >= 1 && kIoTaskPriority <= 24,
+              "I/O 任务优先级必须落在 [1,24]");
+static_assert(kProtoTaskPriority >= 1 && kProtoTaskPriority <= 24,
+              "控制面任务优先级必须落在 [1,24]");
+static_assert(kDataTaskPriority >= 1 && kDataTaskPriority <= 24,
+              "数据面任务优先级必须落在 [1,24]");
 
 }  // namespace et
