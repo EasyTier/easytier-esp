@@ -2,7 +2,7 @@
 
 把 ESP32 设备接入一个既有 EasyTier 虚拟网络的 ESP-IDF 组件（C++20，公开接口全部为 C++）。
 
-- **仅适配 ESP-IDF 6.1.x**（`idf_component.yml` 声明 `>=6.1,<6.2`），首版在 ESP32-S3 上验证。
+- **仅适配 ESP-IDF 6.1.x**（`idf_component.yml` 声明 `>=6.1,<6.2`），当前验证目标为 ESP32-S3。
 - 协议基线：本地 EasyTier 提交 `32dc7f1f406e5fe43ba095a918a7a1c4b28f2335`（`v2.7.0-24-g32dc7f1f`）。
 
 ## 职责边界
@@ -15,7 +15,7 @@
 
 ## 当前实现状态
 
-已实现（本轮以 ESP-IDF 6.1 构建验证；历史宿主测试记录见提交历史）：
+已实现（以 ESP-IDF 6.1 构建验证；历史测试记录见提交历史）：
 
 - 与上游核心相同格式的 TOML 配置（`et::Inst` 构造函数直接接受 TOML 文本，应用自行读文件）：
   支持的字段必须写对，不支持的字段不解析也不报错（对齐上游 serde 行为）；
@@ -67,7 +67,7 @@ hostname = "esp32-s3"
 ipv4 = "10.144.144.10/24"
 dhcp = false
 
-# 上游参数可以保留；首版不创建监听端口。
+# 上游参数可以保留；本组件只做出站连接，不创建监听端口。
 listeners = ["tcp://0.0.0.0:11010", "udp://0.0.0.0:11010"]
 
 [network_identity]
@@ -148,23 +148,20 @@ TOML 语法错误、支持字段取值非法、解析嵌套/语法树超限都�
 | `flags.mtu` | `1380` | 上游 `common.proto` 的 flags 默认值 |
 | `flags.enable_encryption` | `true` | 上游 `common.proto` 中 `enable_encryption` 的 `default: "true"`；关闭时数据与 RPC 报文不带 AEAD 尾与加密位，并拒绝收到的已加密报文（对齐上游 `NullCipher`） |
 
-## 本次真机崩溃修复
+## 已知平台陷阱与实现约束
 
-`dhcp assigned virtual ip` 后崩溃的调用链落在 `esp_netif_internal_dhcpc_cb`：
-IDF 6.1 默认把 lwIP `netif->state` 当作 `esp_netif_t*`，原实现却在此保存
-`VirtualNetif*`，导致地址变化回调访问错误对象。raw 虚拟网卡现在保持 `state=nullptr`，
-通过标准布局首成员找回自身对象，继续使用 `netifapi_*` 与 `tcpip_input`。
-该隔离关系由布局断言与注释约束；仍需用户上板执行确认。
-
-单入口不再被两个连接槽同时连接，相同 host:port 已占用时不会再次选用。
-每槽重试使用独立截止时间，避免等待备用入口时阻塞现有连接的收发与保活。
-
-后续上板日志已确认虚拟网卡创建成功，但出现 IDLE 看门狗超时：FreeRTOS 100 Hz 时，
-5 ms 转换为 0 tick，原控制面/数据面循环持续轮询。两任务现在至少阻塞 1 tick，且每轮
-队列处理限额为 8 条，持续流量下也会让出 CPU；不通过关闭看门狗来规避问题。
-DHCP 网卡创建/改址成功后同步更新公开 IPv4/前缀，再发送 NetworkReady，避免 `vip=none`。
-新调度行为和状态输出仍需用户上板确认。若监控提示 ELF checksum mismatch，应先确认
-运行固件与本地 ELF 一致；不一致时自动反解的函数名与行号不可作为新固件的崩溃证据。
+- **raw 虚拟网卡不能把 `VirtualNetif*` 存进 `netif->state`**：IDF 6.1 的 esp-netif 全局
+  回调会把它当作 `esp_netif_t*`（曾导致 `esp_netif_internal_dhcpc_cb` 崩溃）。现在保持
+  `state=nullptr`，通过标准布局首成员找回对象，继续使用 `netifapi_*` 与 `tcpip_input`；
+  该布局由 `static_assert` 与注释约束。
+- 同一入口（相同 `host:port`）只允许占用一个连接槽；每槽使用独立重试截止时间，等待
+  备用入口时不阻塞其它连接的收发与保活。
+- FreeRTOS 100 Hz 时 `pdMS_TO_TICKS(5)` 为 0：控制面/数据面循环必须至少阻塞 1 tick，
+  且每轮限制处理条数，避免持续流量饿死 IDLE；不要通过关闭看门狗来规避。
+- DHCP 网卡创建/改址成功后，先更新公开 IPv4/前缀状态，再发送 `NetworkReady`，避免
+  接入方看到 `vip=none`。
+- 监控日志若提示 ELF checksum mismatch，先确认运行固件与本地 ELF 一致；错配 ELF 的
+  自动反解函数名/行号不能作为崩溃证据。
 
 ## 用法
 
@@ -181,7 +178,7 @@ DHCP 网卡创建/改址成功后同步更新公开 IPv4/前缀，再发送 Netw
 > 不启动组网，并在日志里提示。
 
 ```cpp
-#include "easytier-esp.h"
+#include "easytier-esp.hpp"
 #include <optional>
 #include <string_view>
 
@@ -242,8 +239,8 @@ void start_easytier() {
 ## 资源上限
 
 编译期上限通过 Kconfig 配置（`CONFIG_EASYTIER_ESP_*`）：**同时连接**的入口数、组件日志
-等级、并发 RPC 事务、分片重组槽与各队列深度。容量不足时返回明确错误码并在诊断中体现，
-不会静默截断。
+等级、并发 RPC 事务、分片重组槽、各队列深度与三个任务栈/优先级。容量不足时通过
+错误码与 Error 日志体现，不会静默截断。
 
 **TOML 文本没有长度上限、也没有解析堆预算**：组件直接解析应用传入的文本（文本由应用以
 `std::string`/`std::string_view` 持有），不复制、不按固定容量截断；解析器分配失败由
@@ -297,8 +294,8 @@ tomlc17 自身以 "out of memory" 报错并映射为 `ESP_ERR_NO_MEM`。仍然�
 >
 > 队列深度单列在 menuconfig 的 **EasyTier-ESP → 队列深度** 菜单里；每加深一格，
 > 帧队列就多占约 2 KiB 常驻堆内存（`q_snapshot` 固定深度 1，不提供选项）。
-> 旧版本的帧队列默认是 4，突发路由同步/RPC 下容易溢出（丢帧并计入 `dropped`），
-> 因此新默认调到 8；内存紧张或流量很大时按需增减。
+> 帧队列默认 8：突发路由同步/RPC 下比更小的深度更不容易丢帧（丢帧会计入
+> `dropped`）；内存紧张时可按需调小，但要留意这一风险。
 
 宿主构建没有 sdkconfig，使用 `support/config_limits.hpp` 里的同一批默认值
 （Kconfig 的 `range` 之外还有 `static_assert` 兜底，越界会让固件编译失败）。
@@ -311,7 +308,7 @@ tomlc17 自身以 "out of memory" 报错并映射为 `ESP_ERR_NO_MEM`。仍然�
 | 项目 | 大小 | 说明 |
 | --- | --- | --- |
 | `Context`（堆） | 92,248 B | `RpcReassembler`（2 槽 × 16 KiB ≈ 33 KiB）+ `SyncEngine`（拓扑 / 邻接表 / 快照 / 编码缓冲 ≈ 35 KiB）+ RPC 收发缓冲（≈ 15 KiB）+ `Settings` 外壳 + 其它 |
-| `Inst` 对象本体 | 8 B | 私有 `Context*` + `esp_err_t last_error_`（诊断与 `started_` 都不在 `Inst` 上）；设置项与运行状态在堆上的 `Context` 内 |
+| `Inst` 对象本体 | 8 B | 私有 `Context*` + `esp_err_t last_error_`；设置项与运行状态都在堆上的 `Context` 内 |
 | `Settings` 文本字段（堆） | 按实际长度 | 实例名 / 主机名 / 网络名 / 网络密钥都是 `std::string`（短字段走 SSO），**长度无固定上限** |
 | 入口地址列表（堆） | 每条约 32 B + 主机文本 | `std::vector<PeerEndpoint>`，按配置实际条数分配；条目数量无上限 |
 | 帧队列 `q_rx_ctrl`/`q_tx`/`q_rx_data` | 默认约 47 KiB | 深度各 8（Kconfig `EASYTIER_ESP_QUEUE_*_DEPTH`）× 约 2 KiB；深度可直接换算成常驻内存 |
@@ -334,8 +331,8 @@ PSRAM）；示例 `sdkconfig.defaults` 只调大了 socket 上限，并未默认
 idf.py build
 ```
 
-当前工作区没有 `tests/` 和 `test_apps/`，不提供可执行的宿主/设备测试入口。
-此前的测试记录仅代表历史验证，不作为本次构建已经执行测试的证据。
+当前工作区没有 `tests/` 和 `test_apps/`，不提供可执行的宿主/设备测试入口；
+历史测试记录不代表当前构建已验证，测试需自行执行。
 硬件运行与真实对端互操作由用户手动完成（代理不接触串口与烧录）。
 
 ## 任务栈预算校验

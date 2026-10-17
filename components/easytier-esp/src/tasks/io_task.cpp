@@ -174,9 +174,9 @@ void Context::drop_slot(size_t slot, SlotState& st) noexcept {
 /**
  * @brief 把待发帧搬进各槽的发送队列（按选路规则）。
  *
- * @details 关键区分（曾经的缺陷）：**有槽匹配但暂时写不进去**（发送槽位已满 = 正常
- *          背压）必须保留队头等下一轮，绝不能丢；只有"根本没有任何槽匹配该帧"（目标
- *          连接不存在或代际已过期）才丢弃，否则会阻塞整个队列。
+ * @details 关键区分：**有槽匹配但暂时写不进去**（发送槽位已满 = 正常背压）必须保留
+ *          队头等下一轮，绝不能丢；只有"根本没有任何槽匹配该帧"（目标连接不存在或
+ *          代际已过期）才丢弃，否则会阻塞整个队列。
  */
 void Context::pump_tx(std::array<SlotState, kMaxConnSlots>& states) noexcept {
     FrameMessage tx{};

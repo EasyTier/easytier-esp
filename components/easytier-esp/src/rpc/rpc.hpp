@@ -4,7 +4,7 @@
  *
  * @details
  * - **服务注册表**：把 (domain, proto, service, method_index) 映射到处理函数；
- *   首版只需注册 `network_name / OspfRouteRpc / SyncRouteInfo / method_index=1`；
+ *   只需注册 `network_name / OspfRouteRpc / OspfRouteRpc / method_index=1`（方法名 SyncRouteInfo）；
  * - **事务表**：为发出的请求分配事务 id，按 (事务 id, 代际) 关联响应，超时回收；
  * - **分发**：目标为本机的请求才进入本地服务；非本机请求由调用方按 overlay 路由
  *   转发，绝不当成本地调用处理。

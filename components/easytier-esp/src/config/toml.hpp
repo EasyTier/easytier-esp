@@ -23,7 +23,7 @@
 #include <string_view>
 
 #include "config/config.hpp"
-#include "easytier-esp.h"
+#include "easytier-esp.hpp"
 
 namespace et {
 

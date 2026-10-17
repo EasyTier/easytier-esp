@@ -44,7 +44,7 @@ bool TcpConn::begin_connect(std::string_view host, uint16_t port) noexcept {
     std::snprintf(port_buf, sizeof(port_buf), "%u", static_cast<unsigned>(port));
 
     addrinfo hints{};
-    hints.ai_family = AF_INET;  // 首版仅 IPv4
+    hints.ai_family = AF_INET;  // 仅 IPv4
     hints.ai_socktype = SOCK_STREAM;
     addrinfo* res = nullptr;
     if (::getaddrinfo(host_buf, port_buf, &hints, &res) != 0 || res == nullptr) {

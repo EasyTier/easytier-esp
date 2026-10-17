@@ -35,7 +35,7 @@ constexpr const char* kTag = "ET.CONTEXT";
 
 // 单个实例的常驻内存必须保持有界：Context 在堆上分配（大于 16 KiB 的分配会走
 // PSRAM），但仍要有上限，避免后续加入功能时悄悄膨胀。实测组成（ESP32-S3，字节）：
-//   Context 合计 92248（不含解析诊断：诊断已改为直接写日志，不再缓存报告）
+//   Context 合计 92248（不含解析诊断：诊断直接写日志，不占上下文内存）
 //     ├─ RpcReassembler（2 槽 × (8 KiB 收包 + 8 KiB 有序缓冲)）33184
 //     ├─ SyncEngine（拓扑 / 最短路 / 邻接表 / 快照 / 编码缓冲）约 34.7 KiB
 //     ├─ RPC 收发缓冲（body 8 KiB + service 4 KiB + 组帧/错误缓冲，见成员声明）

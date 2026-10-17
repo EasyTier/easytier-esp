@@ -141,7 +141,7 @@ void Context::handle_netif_output(const NetifRxItem& item) noexcept {
     }
     const uint32_t dst = ipv4_destination(ip_packet);
     if (ipv4_is_broadcast_or_multicast(dst)) {
-        // 首版不支持出站广播/组播（设计已明确），显式计数。
+        // 不支持出站广播/组播，显式计数。
         dropped.fetch_add(1);
         return;
     }

@@ -18,7 +18,7 @@
 #include "freertos/task.h"
 #include "sdkconfig.h"
 
-#include "easytier-esp.h"
+#include "easytier-esp.hpp"
 
 #if CONFIG_EXAMPLE_EASYTIER_TOML_ENABLED
 

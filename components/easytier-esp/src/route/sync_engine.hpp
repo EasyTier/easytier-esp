@@ -18,7 +18,7 @@
 #include <span>
 #include <string>
 
-#include "easytier-esp.h"
+#include "easytier-esp.hpp"
 #include "protocol/messages.hpp"
 #include "route/dhcp.hpp"
 #include "route/route_info.hpp"

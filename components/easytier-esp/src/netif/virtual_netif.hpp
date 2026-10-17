@@ -16,7 +16,7 @@
 #include <atomic>
 #include <cstdint>
 
-#include "easytier-esp.h"
+#include "easytier-esp.hpp"
 
 #if defined(ESP_PLATFORM)
 #include "lwip/netif.h"

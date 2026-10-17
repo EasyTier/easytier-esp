@@ -19,7 +19,7 @@
 #include <cstddef>
 #include <cstdint>
 
-#include "easytier-esp.h"
+#include "easytier-esp.hpp"
 #include "config/config.hpp"
 #include "support/config_limits.hpp"
 #include "crypto/aes_gcm.hpp"

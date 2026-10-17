@@ -1,10 +1,11 @@
 /**
- * @file easytier-esp.h
+ * @file easytier-esp.hpp
  * @brief EasyTier-ESP 公开接口：把本设备接入一个已有的 EasyTier 虚拟网络。
  *
  * @details
  * - 公开接口仅提供 C++20 API，不提供 C 包装层；内部实现位于 @c namespace et。
- * - **只有一个公开类 @ref et::Inst**：用 TOML 文本构造即完成全部设置（组件**不接受
+ * - **唯一的公开类是 @ref et::Inst**（另有只读的 @ref Settings / @ref PeerEndpoint 数据结构）：
+ *   用 TOML 文本构造即完成全部设置（组件**不接受
  *   文件路径**，应用自己读取文件后把文本交给构造函数），析构即停止任务并释放资源。
  * - 没有配置类：设置项仍由 TOML 全量构造，应用只能在构造后通过
  *   @ref et::Inst::get_config_info 取一份 @ref Settings 副本（网络密钥字段已抹除）。
@@ -15,7 +16,7 @@
  *   静默忽略（与上游 `get_ipv4().parse().ok()` 一致）。
  * - 组件不初始化 WiFi、不挂载文件系统、不修改物理默认网卡，这些由应用负责。
  *
- * @note 首版仅适配 ESP-IDF 6.1.x。
+ * @note 仅适配 ESP-IDF 6.1.x（`idf_component.yml` 约束 `>=6.1,<6.2`）。
  */
 #pragma once
 
@@ -124,7 +125,7 @@ enum class EventType : uint8_t {
     Started,       ///< start() 已创建运行资源
     PeerUp,        ///< 一个入口 peer 握手完成
     NetworkReady,  ///< 握手与有效路由同步完成，组网可用
-    PeerDown,      ///< 一个直连 peer 断开
+    PeerDown,      ///< 预留：直连 peer 断开（当前版本不产生，改由状态/路由变化体现）
     Error,         ///< 发生错误
     Stopped,       ///< 已停止
 };
@@ -202,8 +203,8 @@ class Context;
  * 典型调用顺序：
  * @code
  * // text 由应用读取（或像示例那样用 EMBED_TXTFILES 内嵌）；组件不接受文件路径。
- * // 构造会解析 TOML 并分配约 91 KiB 上下文，请放在栈足够大的任务里。
- * static std::optional<et::Inst> inst;      // 存储方式由应用决定
+ * // TOML 解析需要较大栈；存储方式由应用决定。
+ * static std::optional<et::Inst> inst;
  * inst.emplace(kTomlText, options);
  * if (!inst->valid()) {
  *     // 失败原因已由组件以 Error 级日志输出；这里只需要看错误码

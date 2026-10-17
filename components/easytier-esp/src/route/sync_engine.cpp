@@ -154,7 +154,7 @@ bool SyncEngine::build_self_info(uint32_t now) noexcept {
     info.has_ipv4 = my_ipv4_ != 0;
     info.ipv4 = my_ipv4_;
     info.network_length = my_prefix_;
-    // 首版能力：支持邻接收敛、禁用 P2P；不宣告 public server / avoid relay。
+    // 当前能力：支持邻接收敛、禁用 P2P；不宣告 public server / avoid relay。
     info.feature_flags = peer_feature::SupportConnListSync | peer_feature::DisableP2p;
     info.hostname = config_.hostname;
     info.last_update_secs = now / 1000;  // 仅参考；对端会用本地时间覆盖
