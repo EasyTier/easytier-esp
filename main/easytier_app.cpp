@@ -194,7 +194,7 @@ void start_easytier() {
     // 只保持 WiFi 连接，不启动组网，并明确提示如何补上配置。
     ESP_LOGW(kTag,
              "main/easytier.toml not found; create it and rebuild "
-             "(TOML format: components/easytier-esp/README.md)");
+             "(TOML example: README.md)");
     return;
 #else
     auto len = static_cast<size_t>(easytier_toml_end - easytier_toml_start);
