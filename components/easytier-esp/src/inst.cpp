@@ -83,15 +83,15 @@ esp_err_t Inst::connect() noexcept {
     if (ctx_ == nullptr) {
         return ESP_ERR_INVALID_STATE;
     }
-    // Context 仍用统一的物理网络开关实现：connect() = underlay ready。
-    return ctx_->set_underlay_ready(true);
+    // Context 内部只有一条连接开关：connect() → set_connection(true)。
+    return ctx_->set_connection(true);
 }
 
 esp_err_t Inst::disconnect() noexcept {
     if (ctx_ == nullptr) {
         return ESP_ERR_INVALID_STATE;
     }
-    return ctx_->set_underlay_ready(false);
+    return ctx_->set_connection(false);
 }
 
 esp_err_t Inst::get_status(Status& out) const noexcept {

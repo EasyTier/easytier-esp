@@ -90,7 +90,7 @@ esp_err_t Context::stop(uint32_t timeout_ms) noexcept {
         return ESP_OK;  // 幂等
     }
     state.store(State::Stopping);
-    underlay_ready.store(false);
+    connection_enabled.store(false);
     stop_requested.store(true);
 
     if (!wait_tasks(timeout_ms)) {
@@ -109,21 +109,22 @@ esp_err_t Context::stop(uint32_t timeout_ms) noexcept {
 #endif
 }
 
-/** @brief 通知物理网络就绪/断开（零等待入队）。 */
-esp_err_t Context::set_underlay_ready(bool ready) noexcept {
+/** @brief 应用连接开关：connect=true / disconnect=false（零等待入队）。 */
+esp_err_t Context::set_connection(bool connected) noexcept {
 #if defined(ESP_PLATFORM)
     if (!started_) {
         return ESP_ERR_INVALID_STATE;
     }
     SmallMessage msg{};
-    msg.kind = static_cast<uint8_t>(ready ? AppCommand::UnderlayUp : AppCommand::UnderlayDown);
-    // 非阻塞：队列满时返回错误，由调用方重试，绝不静默丢弃物理网络状态。
+    msg.kind =
+        static_cast<uint8_t>(connected ? AppCommand::Connect : AppCommand::Disconnect);
+    // 非阻塞：队列满时返回错误，由调用方重试，绝不静默丢弃连接控制。
     if (xQueueSend(q_app_cmd, &msg, 0) != pdTRUE) {
         return ESP_ERR_NO_MEM;
     }
     return ESP_OK;
 #else
-    (void)ready;
+    (void)connected;
     return ESP_ERR_NOT_SUPPORTED;
 #endif
 }
@@ -174,7 +175,7 @@ esp_err_t Context::create_runtime() noexcept {
     }
 
     stop_requested.store(false);
-    underlay_ready.store(false);
+    connection_enabled.store(false);
     dropped.store(0);
     last_error.store(ESP_OK);
     state.store(State::WaitingUnderlay);

@@ -51,10 +51,10 @@ inline constexpr size_t kMaxConnSlots = kMaxConnectedPeers;
 /// 任务数量
 inline constexpr size_t kTaskCount = 3;
 
-/** @brief 应用 → 控制面的命令。 */
+/** @brief 应用 → 控制面的连接控制命令。 */
 enum class AppCommand : uint8_t {
-    UnderlayUp,    ///< 物理网络就绪
-    UnderlayDown,  ///< 物理网络断开
+    Connect,     ///< 应用允许连接
+    Disconnect,  ///< 应用要求断开
 };
 
 /** @brief 控制面 → I/O 的命令。 */
@@ -65,7 +65,7 @@ enum class IoCommand : uint8_t {
 /** @brief I/O → 控制面的连接事件。 */
 enum class IoEvent : uint8_t {
     Connected,     ///< TCP 已建立
-    Disconnected,  ///< TCP 已断开（对端关闭、错误或物理网络断开）
+    Disconnected,  ///< TCP 已断开（对端关闭、错误或应用 disconnect()）
 };
 
 #if defined(ESP_PLATFORM)
@@ -153,8 +153,8 @@ public:
      */
     esp_err_t stop(uint32_t timeout_ms) noexcept;
 
-    /** @brief 通知物理网络是否就绪（非阻塞入队；未启动返回 @c ESP_ERR_INVALID_STATE）。 */
-    esp_err_t set_underlay_ready(bool ready) noexcept;
+    /** @brief 应用连接开关（非阻塞入队；未启动返回 @c ESP_ERR_INVALID_STATE）。 */
+    esp_err_t set_connection(bool connected) noexcept;
 
 private:
     friend class Inst;  ///< 公共快照（get_status/get_config_info）由 Inst 直接读取
@@ -255,7 +255,7 @@ private:
 
     // ---- 共享状态（原子量，跨任务读取）------------------------------------
     std::atomic<State> state{State::Uninitialized};   ///< 当前状态
-    std::atomic<bool> underlay_ready{false};          ///< 物理网络是否就绪
+    std::atomic<bool> connection_enabled{false};      ///< 应用是否允许连接（connect/disconnect）
     std::atomic<bool> stop_requested{false};          ///< 停止请求
     std::atomic<uint32_t> generation{1};              ///< 当前连接代际
     std::atomic<uint32_t> my_peer_id{0};              ///< 本端 peer id
@@ -311,7 +311,7 @@ private:
     QueueHandle_t q_tx = nullptr;       ///< 控制面 → I/O：待发送的帧
     QueueHandle_t q_evt = nullptr;      ///< I/O → 控制面：连接事件
     QueueHandle_t q_io_cmd = nullptr;   ///< 控制面 → I/O：重连命令
-    QueueHandle_t q_app_cmd = nullptr;  ///< 应用 → 控制面：物理网络状态
+    QueueHandle_t q_app_cmd = nullptr;  ///< 应用 → 控制面：连接控制
     QueueHandle_t q_rx_data = nullptr;  ///< I/O → 数据面：Data 帧
     QueueHandle_t q_netif_rx = nullptr; ///< TCPIP 线程 → 数据面：出站 pbuf
     QueueHandle_t q_snapshot = nullptr; ///< 控制面 → 数据面：路由快照（长度 1，按值覆盖）

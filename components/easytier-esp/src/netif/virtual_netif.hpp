@@ -50,7 +50,7 @@ public:
     /** @brief 更新地址（dhcp 换址时调用）。 */
     esp_err_t set_address(uint32_t ip, uint8_t prefix) noexcept;
 
-    /** @brief 链路 up/down（underlay 或最后一个可用 peer 丢失时）。 */
+    /** @brief 链路 up/down（应用 disconnect() 或最后一个可用 peer 丢失时）。 */
     esp_err_t set_link(bool up) noexcept;
 
     /** @brief 移除网卡并释放状态。 */

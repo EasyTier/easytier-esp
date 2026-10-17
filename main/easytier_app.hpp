@@ -26,7 +26,7 @@
 namespace easytier_app {
 
 /**
- * @brief 通知物理网络已取得 IP。
+ * @brief 通知组件可以连接（WiFi 已取得 IP）。
  *
  * @details 首次调用创建一次性启动任务执行组网初始化；之后每次调用（WiFi 掉线重连后
  *          重新取得 IP）只再调用一次 @c et::Inst::connect() —— 少了这一步组件会一直
@@ -37,7 +37,7 @@ namespace easytier_app {
 void on_ip_got() noexcept;
 
 /**
- * @brief 通知物理网络已断开（组件会撤销连接与路由，恢复后自动重连）。
+ * @brief 通知组件断开（组件会撤销连接与路由，恢复后重新 connect）。
  * @note 组网尚未启动时为空操作；可从 WiFi 事件回调直接调用。
  */
 void on_ip_lost() noexcept;

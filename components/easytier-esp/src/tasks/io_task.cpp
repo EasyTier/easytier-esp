@@ -12,7 +12,8 @@
  *     （同一网络密钥下，重连后的密文依然有效，按 peer 选路更稳）；
  *   * 带代际的帧（控制面自己发的握手/Ping/RPC/同步）：只有该代际所属的槽；
  *   * 两者都未指定：任一已连接槽。
- * - 连接断开/物理网络断开时上报事件（带槽位与代际）、递增该槽代际并关闭 socket；
+ * - 连接断开（对端关闭/出错/应用 disconnect()）时上报事件（带槽位与代际）、
+ *   递增该槽代际并关闭 socket；
  * - 绝不做解析、加解密或路由判断。
  */
 #include "context.h"
@@ -233,19 +234,19 @@ void Context::run_io() noexcept {
         states[i].retry_at_ms = now_ms() + kInitialBackoffMs;
     }
 
-    bool underlay_was_ready = false;  ///< 上一轮的物理网络状态（用于检测恢复）
+    bool connection_was_enabled = false;  ///< 上一轮的连接开关（用于检测恢复）
 
     while (!stop_requested.load()) {
-        // 0) 物理网络恢复：复位退避，按初始节奏（1 秒）尽快重连，而不是等最长 30 秒。
-        const bool underlay_ready_now = underlay_ready.load();
-        if (underlay_ready_now && !underlay_was_ready) {
+        // 0) 应用重新允许连接：复位退避，按初始节奏（1 秒）尽快重连，而不是等最长 30 秒。
+        const bool connection_enabled_now = connection_enabled.load();
+        if (connection_enabled_now && !connection_was_enabled) {
             for (size_t i = 0; i < kMaxConnSlots; ++i) {
                 states[i].backoff_ms = kInitialBackoffMs;
                 states[i].retry_at_ms = now_ms() + kInitialBackoffMs;
             }
-            ET_LOGI(kTag, "underlay ready, reconnecting entry peers");
+            ET_LOGI(kTag, "connection enabled, reconnecting entry peers");
         }
-        underlay_was_ready = underlay_ready_now;
+        connection_was_enabled = connection_enabled_now;
 
         // 1) 控制面要求某个槽重连（握手失败/超时）。
         SmallMessage cmd{};
@@ -269,8 +270,8 @@ void Context::run_io() noexcept {
             states[slot].backoff_ms = kInitialBackoffMs;
         }
 
-        // 2) 物理网络未就绪：关闭所有会话并等待。
-        if (!underlay_ready.load()) {
+        // 2) 应用要求断开：关闭所有会话并等待 connect()。
+        if (!connection_enabled.load()) {
             for (size_t i = 0; i < kMaxConnSlots; ++i) {
                 if (slots[i].conn->fd() != net::kInvalidSocket || states[i].connecting) {
                     drop_slot(i, states[i]);

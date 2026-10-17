@@ -249,7 +249,7 @@ void start_easytier() {
 void start_task(void*) {
     start_easytier();
     if (g_started) {
-        // 通知组件物理网络已可用：此后组件才会连接入口节点。
+        // 允许组件连接：此后它才会连接入口节点。
         (void)g_inst->connect();
     }
     vTaskDelete(nullptr);

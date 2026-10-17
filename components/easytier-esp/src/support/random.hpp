@@ -11,8 +11,8 @@ namespace et {
 
 /**
  * @brief 用密码学强度的随机字节填充 @p out。
- * @note 目标平台调用 esp_fill_random()，需要物理网络就绪后（WiFi 已取得 IP）
- *       才具备足够熵，因此示例在取得 IP 后才 start() 组件。
+ * @note 目标平台调用 esp_fill_random()（硬件随机源，不依赖网络状态）；示例在
+ *       取得 IP 后才 start() 组件只是为了尽早产生日志，与随机源无关。
  */
 void fill_random(std::span<uint8_t> out) noexcept;
 

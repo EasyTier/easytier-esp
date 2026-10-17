@@ -104,13 +104,13 @@ struct Settings {
  * Uninitialized → Stopped → WaitingUnderlay → Connecting
  *               → Handshaking → Syncing → Ready
  * @endcode
- * 物理网络断开或连接失败会回到 WaitingUnderlay / Connecting 重试；
+ * disconnect() 或连接失败会回到 WaitingUnderlay / Connecting 重试；
  * stop() 期间为 Stopping，之后回到 Stopped。
  */
 enum class State : uint8_t {
     Uninitialized,    ///< 尚未成功配置
     Stopped,          ///< 已配置但未启动
-    WaitingUnderlay,  ///< 等待应用通知物理网络就绪
+    WaitingUnderlay,  ///< 等待应用调用 connect()
     Connecting,       ///< 正在连接入口 peer
     Handshaking,      ///< 正在握手
     Syncing,          ///< 已握手，正在同步路由
@@ -223,7 +223,7 @@ class Context;
  * | 接口 | 可从任意任务调用 | 允许在事件回调中调用 | 说明 |
  * | --- | --- | --- | --- |
  * | @ref get_status / @ref get_config_info / @ref last_error | 是 | 是 | 只读原子量 / 深拷贝设置，返回值与实例无共享 |
- * | @ref connect / @ref disconnect | 是 | 是 | 非阻塞（队列投递），物理网络事件里直接调用 |
+ * | @ref connect / @ref disconnect | 是 | 是 | 非阻塞（队列投递），WiFi/IP 事件里直接调用 |
  * | 构造 | 仅初始化阶段（大栈任务） | 否 | 会解析 TOML 并分配上下文 |
  * | @ref start / @ref stop / 析构 | 同一任务串行 | **否** | 会等待任务，见下方死锁说明 |
  *
@@ -287,23 +287,24 @@ public:
     esp_err_t start() noexcept;
 
     /**
-     * @brief 通知组件物理网络（WiFi/以太网）已可用，开始/恢复组网。
+     * @brief 通知组件可以连接：开始/恢复组网。
      *
-     * @details 组件收到通知后才会连接入口节点、握手并同步路由；在调用它之前实例
-     *          一直停在 @ref State::WaitingUnderlay。该接口非阻塞、可从事件回调中
-     *          调用，可重复调用（幂等）。**WiFi 掉线重连后必须再次调用**，否则组件
-     *          会一直认为物理网络不可用。
+     * @details 由应用决定何时允许连接（例如 WiFi/以太网取得 IP 后调用）。在调用它
+     *          之前实例一直停在 @ref State::WaitingUnderlay，不会连接任何入口节点。
+     *          该接口非阻塞、可从事件回调中调用，可重复调用（幂等）。
+     *          **WiFi 掉线重连后必须再次调用**，否则组件不会再连接入口。
      * @return @c ESP_OK；@c ESP_ERR_INVALID_STATE（未 start 或构造失败）；
      *         @c ESP_ERR_NO_MEM（内部命令队列满，稍后重试）
      */
     esp_err_t connect() noexcept;
 
     /**
-     * @brief 通知组件物理网络已断开，撤销组网连接与路由。
+     * @brief 通知组件断开：撤销组网连接与路由。
      *
-     * @details 组件会立即关闭所有入口 TCP 连接、从拓扑/路由中移除对端并回到
-     *          @ref State::WaitingUnderlay；物理网络恢复后再调用 @ref connect。
-     *          非阻塞、可从事件回调中调用，可重复调用（幂等）。
+     * @details 由应用决定何时断开（例如 WiFi 断开时调用）。组件会立即关闭所有入口
+     *          TCP 连接、从拓扑/路由中移除对端并回到 @ref State::WaitingUnderlay；
+     *          再次 @ref connect 后重新开始组网。非阻塞、可从事件回调中调用，
+     *          可重复调用（幂等）。
      * @return @c ESP_OK；@c ESP_ERR_INVALID_STATE（未 start 或构造失败）；
      *         @c ESP_ERR_NO_MEM（内部命令队列满，稍后重试）
      */

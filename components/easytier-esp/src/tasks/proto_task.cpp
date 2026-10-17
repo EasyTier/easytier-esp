@@ -3,7 +3,7 @@
  * @brief 控制面任务：握手、保活、RPC（分片/重组/压缩协商）与状态机。
  *
  * @details 职责：
- * - 消费应用命令（物理网络就绪/断开）与 I/O 事件（连接建立/断开）；
+ * - 消费应用命令（connect/disconnect）与 I/O 事件（连接建立/断开）；
  * - 连接建立后立即发送握手，5 秒内未完成握手则要求 I/O 重连；
  * - 校验对端握手（网络名、摘要、peer id 冲突），成功后进入 Syncing 并上报 PeerUp；
  * - 保活：按 1/2/4/8/16/30 秒退避发送 Ping，收到 Pong 后拉长间隔；
@@ -472,17 +472,17 @@ void Context::run_proto() noexcept {
     while (!stop_requested.load()) {
         const uint32_t now = now_ms();
 
-        // 1) 应用命令：物理网络就绪状态（由控制面单写 underlay_ready）。
+        // 1) 应用命令：连接开关（由控制面单写 connection_enabled）。
         SmallMessage app{};
         for (size_t n = 0; n < kMaxMessagesPerLoop &&
              xQueueReceive(q_app_cmd, &app, 0) == pdTRUE; ++n) {
-            if (app.kind == static_cast<uint8_t>(AppCommand::UnderlayUp)) {
-                underlay_ready.store(true);
+            if (app.kind == static_cast<uint8_t>(AppCommand::Connect)) {
+                connection_enabled.store(true);
                 if (!sync.peer_up()) {
                     state.store(State::Connecting);
                 }
             } else {
-                underlay_ready.store(false);
+                connection_enabled.store(false);
                 for (size_t i = 0; i < kMaxConnSlots; ++i) {
                     reset_slot(i);
                 }
@@ -506,7 +506,7 @@ void Context::run_proto() noexcept {
                         static_cast<unsigned>(evt.generation));
             } else if (session_generation[slot] == evt.generation) {
                 reset_slot(slot);
-                state.store(underlay_ready.load() ? State::Connecting
+                state.store(connection_enabled.load() ? State::Connecting
                                                           : State::WaitingUnderlay);
             }
         }

@@ -42,7 +42,7 @@
   计数防环）、转发计数与丢弃统计；非本地 RPC 也按 overlay 路由转发；
 - dhcp 自分配虚拟 IPv4（对齐上游 `DhcpIpv4Allocator`：优先沿用当前子网、避开已用
   地址、先等两轮再回落默认子网），地址变化会即时更新网卡并重新通告；
-- `main` 示例：NVS + esp-netif + WiFi STA 重连 + 内嵌 TOML + underlay 通知。
+- `main` 示例：NVS + esp-netif + WiFi STA 重连 + 内嵌 TOML + 连接控制（`connect()`/`disconnect()`）。
 
 尚未实现（按设计文档分阶段推进）：
 
@@ -203,7 +203,7 @@ void start_easytier() {
                  options);
     if (!inst->valid()) { /* 看 inst->last_error() */ inst.reset(); return; }
     if (inst->start() != ESP_OK) { inst.reset(); return; }
-    // 物理网络取得 IP 后通知组件；断网时调用 disconnect()。
+    // 取得 IP 后允许组件连接；断网时调用 disconnect()。
     (void)inst->connect();
 }
 ```
@@ -258,7 +258,7 @@ tomlc17 自身以 "out of memory" 报错并映射为 `ESP_ERR_NO_MEM`。仍然�
 | --- | --- | --- | --- |
 | `inst.last_error` | 是 | 是 | 只读构造阶段的错误码 |
 | `inst.get_status` / `get_config_info` | 是 | 是 | 只读原子量 / 深拷贝 `Settings`，与实例无共享 |
-| `inst.connect` / `disconnect` | 是 | 是 | 非阻塞（队列投递），物理网络事件里直接调用 |
+| `inst.connect` / `disconnect` | 是 | 是 | 非阻塞（队列投递），WiFi/IP 事件里直接调用 |
 | `et::Inst` 构造 | 仅初始化阶段（大栈任务，串行） | 否 | 解析 TOML 并分配约 91 KiB 上下文 |
 | `inst.start` / `stop` / 析构 | 同一任务串行 | **否** | 会等待组件任务退出 |
 

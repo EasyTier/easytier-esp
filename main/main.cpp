@@ -36,7 +36,7 @@ void on_wifi_event(void*, esp_event_base_t base, int32_t id, void* data) {
         return;
     }
     if (base == WIFI_EVENT && id == WIFI_EVENT_STA_DISCONNECTED) {
-        // 物理网络断开：先通知组件撤销连接与路由，再重连 WiFi。
+        // WiFi 断开：先让组件 disconnect() 撤销连接与路由，再重连 WiFi。
         easytier_app::on_ip_lost();
         const int max_retry = CONFIG_EXAMPLE_WIFI_MAX_RETRY;
         if (max_retry == 0 || g_retry < max_retry) {
