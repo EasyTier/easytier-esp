@@ -2,4 +2,4 @@
 dependencies:
   ## 本组件与示例仅针对 ESP-IDF 6.1 开发与验证。
   idf:
-    version: '>=6.1,<6.2'
+    version: '>=6.1'

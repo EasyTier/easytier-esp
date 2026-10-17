@@ -1,5 +1,11 @@
-## IDF Component Manager Manifest File
+version: 0.0.1
+# license: "LGPL-3.0"
+description: A lightweight implementation of the EasyTier protocol for ESP32
+url: https://cnb.cool/myqfeng/qteasytier/easytier-esp
+# Another url: https://github.com/easytier/easytier-esp
+files:
+  exclude:
+  - .git
 dependencies:
-  ## This component is developed and verified against ESP-IDF 6.1 only.
   idf:
-    version: '>=6.1,<6.2'
+    version: ">=6.1"
