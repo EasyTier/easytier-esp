@@ -1,14 +1,6 @@
 /**
  * @file inst.cpp
- * @brief @c et::Inst 的实现：把 TOML 变成 @ref Settings，再交给 @ref Context 管理。
- *
- * @details 生命周期：
- * @code
- * Inst(toml, options) → 解析 TOML、补齐身份、校验结构、分配并准备 Context
- * start()             → 委托 Context 建队列与任务
- * stop()              → 委托 Context 置停止标志并等待任务退出
- * ~Inst()             → 释放 Context（其析构函数负责停任务、释放资源、清零密钥）
- * @endcode
+ * @brief et::Inst 实现：TOML → Settings → Context；生命周期调用全部委托给 Context。
  */
 #include <new>
 

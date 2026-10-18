@@ -2,15 +2,9 @@
  * @file context.h
  * @brief 组件内部运行上下文（每个 et::Inst 对象独占一份）。
  *
- * @details 设计要点：
- * - **单一所有者**：socket 只属于 I/O 任务，加解密上下文分属控制面与数据面，
- *   跨任务只通过队列传递数据、通过原子量传递状态；
- * - **有界资源**：队列和缓冲都是编译期固定容量，运行期不做无界分配；
- * - **代际（generation）**：每次新建连接都会递增，旧代际的收发数据一律丢弃，
- *   从而避免 fd 复用或旧数据串到新连接上；
- * - **封装**：全部状态与资源都是 private；只有 @ref et::Inst 通过友元读取快照，
- *   任务实现是 @ref Context 的私有成员函数（定义在 tasks 目录的 *_task.cpp），
- *   只有 xTaskCreate / 平台回调所需的入口保持 static 适配器。
+ * @details socket 只属于 I/O 任务，控制面/数据面各持自己的 AEAD；跨任务只通过队列传
+ *          数据、原子量传状态。队列与缓冲都是固定容量；连接代际用于丢弃旧数据。
+ *          数据成员全部 private，任务实现是私有成员函数，@ref et::Inst 通过友元读快照。
  */
 #pragma once
 
@@ -109,18 +103,8 @@ struct SlotState {
 /**
  * @brief 组件运行上下文（RAII：持有队列/任务/连接/AEAD/虚拟网卡与密钥）。
  *
- * @details 生命周期：
- * @code
- * Context ctx(settings, options);   // 拷贝设置、派生密钥、随机 peer id（不建资源）
- * ctx.start();                      // 建队列 / AEAD / TcpConn / 任务
- * ...
- * ctx.stop(5000);                   // 等任务退出（可超时）
- * // 析构：若仍在运行则无限等待，再释放资源并清零密钥
- * @endcode
- *
- * 全部数据成员都是 private：任务实现是 @ref Context 的私有成员函数（定义在
- * tasks 目录的 `*_task.cpp`）直接用 this 访问；@ref et::Inst 通过友元读取状态/配置快照。
- * 多个实例各持一份，互不共享。
+ * @details 构造只准备设置与密钥，@ref start 创建资源，@ref stop 等待任务退出。
+ *          数据成员全部 private；多个实例各持一份，互不共享。
  */
 class Context final {
 public:
@@ -222,10 +206,8 @@ private:
         Event event{};
         event.type = type;
         event.peer_id = peer_id;
-        // 事件里的状态必须与 Inst::get_status() 一致：虚拟地址取"当前实际生效"的地址
-        // （静态或 dhcp 分配结果），可达路由数取控制面发布的最新值。早期版本这里
-        // 回显配置里的静态地址并把路由数写死为 0，导致 dhcp 节点的 NetworkReady
-        // 事件里虚拟地址为 0，接入方据此判断会出错。
+        // 事件快照与 Inst::get_status() 保持一致：虚拟地址取当前生效值，
+        // 可达路由数取控制面最近发布的值。
         event.status.state = state.load();
         event.status.peer_id = my_peer_id.load();
         event.status.virtual_ipv4 = my_ipv4.load();

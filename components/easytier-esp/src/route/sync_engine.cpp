@@ -146,8 +146,8 @@ void SyncEngine::set_direct_peers(const uint32_t* peers, size_t count, uint32_t 
     }
     // 邻接行内容变了：版本 +1，让对端识别为更新。
     ++conn_row_version_;
-    // 把自身邻接行并入本地拓扑：本节点在图上必须有出边，否则无法把流量交给直连对端
-    // （上游的 conn_map 同样包含自身行）。这里用真实时间戳，避免被过期清理误删。
+    // 把自身邻接行并入本地拓扑：本节点在图上必须有出边，否则无法把流量交给直连
+    // 对端（上游的 conn_map 同样包含自身行）。
     (void)topology_.merge_conn_row(my_peer_id_, conn_row_version_, direct_peers_.data(),
                                    direct_peer_count_, now);
 }

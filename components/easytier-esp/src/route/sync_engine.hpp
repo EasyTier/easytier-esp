@@ -1,14 +1,9 @@
 /**
  * @file sync_engine.hpp
- * @brief 路由同步引擎：拓扑合并、自身信息构造、请求/响应编解码与路由重算。
+ * @brief 路由同步引擎：拓扑合并、自身信息、请求/响应编解码与路由重算。
  *
- * @details 把原本散落在控制面任务里的"纯协议逻辑"集中到这里，好处有两个：
- * 1. 可以在宿主测试里让**多个引擎互相对话**，验证多节点（含中继）收敛，而这些
- *    逻辑在设备上只能靠真机验证；
- * 2. 控制面任务只剩下 I/O 编排（收发、定时、事件），职责更清晰。
- *
- * @note 本类不依赖 FreeRTOS/lwIP：所有方法都是确定性纯逻辑，所有缓冲都是成员数组。
- *       它**不是**线程安全的，只应由控制面任务（或宿主测试）单线程访问。
+ * @note 不依赖 FreeRTOS/lwIP；所有缓冲都是成员数组。非线程安全，只由控制面任务
+ *       （或宿主测试）单线程访问。
  */
 #pragma once
 
@@ -39,18 +34,7 @@ namespace et {
 inline constexpr size_t kMaxActivePeers = kMaxConnectedPeers;
 
 /**
- * @brief 路由同步引擎。
- *
- * @details 典型用法（控制面任务）：
- * @code
- * engine.configure(config, my_peer_id);
- * engine.on_peer_up(remote_peer_id, session_id, now);   // 握手成功
- * engine.set_direct_peers(&remote_peer_id, 1, now);
- * size_t len = engine.build_request(buf, true);         // 主动宣告自身
- * engine.handle_request(req, resp, resp_len, now);       // 应答对端
- * engine.handle_response(resp, need_resend);             // 处理 missing
- * if (engine.recompute_if_dirty()) { ...发布快照... }
- * @endcode
+ * @brief 路由同步引擎（拓扑合并、请求/响应、路由重算）。
  */
 class SyncEngine {
 public:
@@ -101,9 +85,7 @@ public:
     [[nodiscard]] bool peer_up() const noexcept { return active_peer_count_ != 0; }
     /**
      * @brief 查询某个直连对端的会话 id（0 表示未知）。
-     * @details 会话 id 是**每个连接各自一份**的（上游 `my_session_id` 属于 PeerRoute
-     *          实例）。早期实现在引擎里只保存一个值，第二个入口握手时会覆盖它，导致
-     *          第一个对端看到"我们的会话 id 变了"而清空已保存的信息。
+     * @details 会话 id 按连接各自保存，与上游每个 PeerRoute 实例的 `my_session_id` 一致。
      */
     [[nodiscard]] uint64_t session_id_of(uint32_t peer_id) const noexcept;
 

@@ -72,7 +72,7 @@ struct RpcCompressionRef {
 /**
  * @brief RPC 报文（common.RpcPacket）。
  *
- * @note 分片字段：新版本单包为 total_pieces=1、piece_idx=0；历史单包为 0/0。
+ * @note 分片字段：新版本单包为 total_pieces=1、piece_idx=0；旧版单包为 0/0。
  *       片 0 提供权威的 descriptor 与 compression 信息，后续分片可以不带。
  */
 struct RpcPacketRef {

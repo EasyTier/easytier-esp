@@ -1,15 +1,9 @@
 /**
  * @file main.cpp
- * @brief EasyTier-ESP 示例入口：NVS、TCP/IP、WiFi、HTTP 与组网流程。
+ * @brief EasyTier-ESP 示例：NVS、TCP/IP、WiFi、HTTP 与组网流程。
  *
- * @details 组网流程全部在 `app_main`（main 任务）中执行，应用层只额外创建一个
- *          HTTPD 任务（由 esp_http_server 内部创建）：
- * 1. WiFi/IP 事件回调只更新连接标志、置事件位并重连 WiFi，不做耗时操作；
- * 2. `app_main` 解析内嵌 TOML、构造 `et::Inst`、`start()`，取得 IP 后 `connect()`；
- * 3. 之后在同一个主循环里处理断线/重连，并每 10 秒打印一次状态。
- *
- * 协议、加密、RPC、路由与虚拟网卡全部由 components/easytier-esp 负责，
- * 本目录不含任何协议实现。
+ * @details 组网全部在 app_main（main 任务）执行；WiFi/IP 事件回调只更新状态并置位。
+ *          应用层只有一个额外任务（HTTPD，由 esp_http_server 创建）。
  */
 #include <array>
 #include <atomic>

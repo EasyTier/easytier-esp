@@ -2,14 +2,9 @@
  * @file virtual_netif.hpp
  * @brief lwIP 虚拟网卡（raw L3，不模拟以太网/ARP）。
  *
- * @details 采用 lwIP 的 raw L3 网卡：
- * - 不设置 `NETIF_FLAG_ETHERNET`/`NETIF_FLAG_ARP`，因此入站/出站都是**完整 IP 报文**；
- * - 入站用 `tcpip_input`，把解密后的报文交给 TCPIP 线程（不能在其他任务里直接调
- *   `ip_input`，否则 TCP 控制块会被无锁访问）；
- * - 网卡的注册、地址变更、up/down 与删除都通过 `netifapi_*`（线程安全）；
- * - `output` 回调运行在 TCPIP 线程，只做 `pbuf_ref + 零等待入队`，加密与查表都在
- *   数据面任务里完成；
- * - 不把该网卡设为 default，物理网卡继续承载入口连接与普通上网。
+ * @details 入站/出站都是完整 IP 报文；注册、改址、up/down、删除都走 `netifapi_*`；
+ *          入站用 `tcpip_input` 交给 TCPIP 线程；`output` 回调只做 `pbuf_ref` 和
+ *          零等待入队。该网卡不设为 default，物理网卡继续承载入口连接与普通上网。
  */
 #pragma once
 

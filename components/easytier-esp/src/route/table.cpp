@@ -40,16 +40,8 @@ size_t RouteSnapshot::reachable_count() const noexcept {
 }
 
 /**
- * @brief 重新计算路由。
- *
- * @details 步骤：
- * 1. 把参与建图的节点映射到 0..n-1 的紧凑下标；
- * 2. 以本节点为源做朴素 Dijkstra：边为"有向邻接"，边权为 1（avoid_relay 出边加
- *    kAvoidRelayPenalty 惩罚跳数）；
- * 3. 记录每个目的节点的第一跳作为下一跳，并构建 IP 映射（含自身 IP）。
- *
- * 快照在计算开始时先被清空，因此任何"不可达"都会立即从下一跳与 IP 映射中消失，
- * 不需要等待 90 秒的元数据清理（与设计一致）。
+ * @brief 重新计算路由：紧凑下标 + 朴素 Dijkstra（跳数优先，avoid_relay 加惩罚），
+ *        记录第一跳并构建 IP 映射。快照先清空，因此不可达节点立即消失。
  */
 void RouteTable::recompute(const Topology& topo, uint32_t self_peer_id) noexcept {
     RouteSnapshot next{};

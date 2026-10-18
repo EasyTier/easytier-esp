@@ -2,15 +2,9 @@
  * @file data_task.cpp
  * @brief 数据面任务：虚拟网卡收发、加解密与转发。
  *
- * @details 职责：
- * - 消费路由快照邮箱（长度 1，按值覆盖），持有**自己的只读副本**；
- * - 处理 netif 出站 pbuf：展平 IP 报文 → 校验 → 目的 IP 查目标节点 → 查下一跳 →
- *   构造 Data 帧并**由源节点加密** → 交给 I/O 任务；
- * - 处理入站 Data 帧：目的为本机则解密后投递 lwIP（`tcpip_input`）；否则保持
- *   `to_peer_id`、密文与 AEAD 尾不变，只递增 `forward_counter` 后转发；
- * - 所有路径都有计数，绝不静默丢弃。
- *
- * @note 控制面与数据面各持一个 AEAD 实例（互不共享）；本任务不做握手/RPC/路由计算。
+ * @details 出站：展开 pbuf → 校验 → 查目的与下一跳 → 组 Data 帧并加密 → 交 I/O；
+ *          入站：目的为本机则解密后 `tcpip_input`，否则保留密文只递增
+ *          `forward_counter` 后转发。所有丢弃路径都有计数；不做握手/RPC/路由计算。
  */
 #include "context.h"
 

@@ -1,17 +1,9 @@
 /**
  * @file proto_task.cpp
- * @brief 控制面任务：握手、保活、RPC（分片/重组/压缩协商）与状态机。
+ * @brief 控制面任务：握手、保活、RPC 与路由同步；Data 帧由 I/O 直接分流到数据面。
  *
- * @details 职责：
- * - 消费应用命令（connect/disconnect）与 I/O 事件（连接建立/断开）；
- * - 连接建立后立即发送握手，5 秒内未完成握手则要求 I/O 重连；
- * - 校验对端握手（网络名、摘要、peer id 冲突），成功后进入 Syncing 并上报 PeerUp；
- * - 保活：按 1/2/4/8/16/30 秒退避发送 Ping，收到 Pong 后拉长间隔；
- * - RPC：加密位跟随 enable_encryption（与数据面共用开关），支持分片发送、乱序重组、
- *   事务匹配与压缩协商（只接受 None，收到 Zstd 视为不支持并上报）；
- * - 服务：注册 `network_name/OspfRouteRpc/SyncRouteInfo/1`，由 SyncEngine 合并真实
- *   拓扑并返回本机会话信息；
- * - Data 帧由 I/O 任务直接分流到数据面队列，不经过本任务。
+ * @details 状态机由 connect/disconnect 与 I/O 事件推进；RPC 支持分片/乱序重组/事务
+ *          匹配，压缩只接受 None（Zstd 视为不支持并上报）。
  */
 #include "context.h"
 
@@ -181,10 +173,9 @@ uint32_t Context::peer_of_generation(uint32_t generation) const noexcept {
 /**
  * @brief 撤销 Ready：遇到无法协商的协议不兼容（当前只有对端使用 zstd 压缩）时调用。
  *
- * @details 约定行为："收到 Zstd 上报不支持、取消事务并撤销 Ready"。只设置
- *          `last_error` 是不够的：节点会一直停在 `ready` 却永远学不到路由，接入方
- *          无法判断组网其实已不可用。这里把状态切到 @ref State::Error 并在**曾经
- *          上报过 Ready** 时补发一次错误事件（避免每个 zstd 报文都刷事件）。
+ * @details 只设置 `last_error` 不够：节点会停在 `ready` 却学不到路由，接入方无法
+ *          判断组网不可用。这里切到 @ref State::Error，并在已上报过 Ready 时补发
+ *          一次错误事件（避免每个 Zstd 报文都刷事件）。
  */
 void Context::revoke_ready(esp_err_t err) noexcept {
     set_error(err);
@@ -768,7 +759,7 @@ void Context::run_proto() noexcept {
             }
         }
 
-        // 7) 超时回收（事务、不完整的分片重组与过期拓扑）。
+        // 7) 超时回收（事务、不完整的分片重组与拓扑清理）。
         transactions.expire(now);
         reassembler.expire(now);
         sync.expire_topology(now);

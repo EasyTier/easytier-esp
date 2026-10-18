@@ -2,15 +2,11 @@
  * @file fragment.hpp
  * @brief RPC 分片与重组。
  *
- * @details 与上游实现对齐的关键点：
- * - 分片按 **UDP** 预算计算：`1300 - (8 字节 UDP 头 + 16 字节 PM 头 + 28 字节 AEAD 尾)`
- *   = 每个 RpcPacket 编码后最多 1248 字节（即使当前走 TCP 也使用同一预算，保证
- *   报文在中继转 UDP 时仍然合法）；
- * - 首片携带 descriptor 与 compression_info；上游在压缩算法为 None 时所有分片都
- *   带 descriptor，本实现保持一致；
- * - 接收侧同时接受新式单包（1/0）与历史单包（0/0）；片 0 的 descriptor 是权威信息；
- * - 重组键包含 from/to、事务、方向与连接代际；乱序与一致重复允许，冲突重复拒绝；
- * - 超过片数/总字节/超时的重组会立即回收，绝不无界增长。
+ * @details 分片预算按 UDP 计算（每个 RpcPacket 编码后 ≤1248 B），当前走 TCP 也用
+ *          同一预算，保证中继转 UDP 时合法。首片携带 descriptor/compression（None
+ *          时每片都带）；接收侧兼容新式单包（1/0）与旧版单包（0/0）。重组键含
+ *          from/to、事务、方向与连接代际；乱序/一致重复允许，冲突重复拒绝；超片数、
+ *          字节数或时限立即回收。
  */
 #pragma once
 

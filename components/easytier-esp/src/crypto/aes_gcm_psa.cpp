@@ -1,15 +1,10 @@
 /**
  * @file aes_gcm_psa.cpp
- * @brief 目标平台 AES-128-GCM 实现。
+ * @brief 目标平台 AES-128-GCM 实现（PSA Crypto）。
  *
- * @details ESP-IDF 6.1 携带 mbedTLS 4.x，公开头文件不再提供 mbedtls_gcm_context
- * （gcm.h 仅存在于 private 目录），因此这里改用 PSA Crypto 的
- * psa_aead_encrypt/psa_aead_decrypt + PSA_ALG_GCM。
- *
- * PSA 的 GCM 把 tag 追加在密文尾部，因此：
- *  - 加密：PSA 输出 [密文|tag]，我们再追加 nonce，得到 [密文|tag|nonce]；
- *  - 解密：把 [密文|tag] 交给 PSA，明文写入本实例的临时缓冲后再拷回，避免依赖
- *    PSA 未承诺的原位（in-place）操作。
+ * @details ESP-IDF 6.1 的 mbedTLS 4.x 不再公开 gcm.h，改用 psa_aead_encrypt/decrypt
+ *          + PSA_ALG_GCM。PSA 输出 [密文|tag]，本实现再追加 nonce 得到线上布局
+ *          [密文|tag|nonce]；解密走临时缓冲，不依赖 PSA 的原位操作。
  */
 #include "crypto/aes_gcm.hpp"
 

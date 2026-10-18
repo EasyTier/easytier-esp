@@ -172,7 +172,7 @@ size_t encode_handshake_request(const HandshakeRequestView& req, MutBytes out) n
 
 /**
  * @brief 解码 RPC 报文。
- * @note descriptor 与 compression 可能缺失（历史单包或非首片）；调用方需按
+ * @note descriptor 与 compression 可能缺失（旧版单包或非首片）；调用方需按
  *       "片 0 权威"的原则处理。
  */
 bool decode_rpc_packet(Bytes in, RpcPacketRef& out) noexcept {

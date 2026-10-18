@@ -1,16 +1,10 @@
 /**
  * @file context.cpp
- * @brief @ref et::Context 的生命周期与运行资源管理（RAII）。
+ * @brief Context 的生命周期与运行资源管理（RAII）。
  *
- * @details 生命周期：
- * @code
- * Context(settings, options) → 拷贝设置、派生密钥、随机 peer id（不创建资源）
- * start()                    → 建队列 / AEAD / TcpConn / 网卡 / 任务
- * stop(timeout)              → 置停止标志、等待任务确认退出（可超时）
- * ~Context()                 → 若仍在运行则无限等待停止，再释放资源并清零密钥
- * @endcode
- * 组件内**没有**全局单实例状态：每个 Context 独占自己的队列、任务、socket、网卡与
- * 加解密实例，因此多个 @ref et::Inst 可以并存（内存与任务数按实例叠加）。
+ * @details 构造只拷贝设置并派生密钥；start() 创建队列/AEAD/TcpConn/网卡/任务；
+ *          stop() 等待任务退出；析构在运行中会无限等待后释放资源。每个 Context
+ *          独占自己的资源，多个 et::Inst 互不共享。
  */
 #include "context.h"
 
@@ -33,21 +27,10 @@ namespace {
 
 constexpr const char* kTag = "ET.CONTEXT";
 
-// 单个实例的常驻内存必须保持有界：Context 在堆上分配（大于 16 KiB 的分配会走
-// PSRAM），但仍要有上限，避免后续加入功能时悄悄膨胀。实测组成（ESP32-S3，字节）：
-//   Context 合计 92248（不含解析诊断：诊断直接写日志，不占上下文内存）
-//     ├─ RpcReassembler（2 槽 × (8 KiB 收包 + 8 KiB 有序缓冲)）33184
-//     ├─ SyncEngine（拓扑 / 最短路 / 邻接表 / 快照 / 编码缓冲）约 34.7 KiB
-//     ├─ RPC 收发缓冲（body 8 KiB + service 4 KiB + 组帧/错误缓冲，见成员声明）
-//     ├─ Settings 外壳（std::string / std::vector 的小对象，文本与入口在堆上）
-//     └─ 其它（AEAD 指针、原子量、dhcp/网卡状态等）
-// 入口地址列表与实例名/主机名/网络名/网络密钥都由 std::string/vector 按实际长度在堆上分配，
-// 因此这些文本写多长都不会让 Context 膨胀。
-// 另外每个实例还有：帧队列（q_rx_ctrl/q_tx/q_rx_data，深度见 Kconfig
-// `EASYTIER_ESP_QUEUE_*`，默认各 8，每元素约 2 KiB）、每个连接槽一个 TcpConn 约 12 KiB
-// （堆，数量见 Kconfig `EASYTIER_ESP_MAX_CONNECTED_PEERS`，默认 6）、
-// 三个任务栈 6+10+8 = 24 KiB。因此**强烈建议启用 PSRAM**（示例 sdkconfig 已启用，
-// 大于 16 KiB 的分配会落到 PSRAM）。新增缓冲时请同步更新本注释与 README 的内存表。
+// Context 常驻内存保持有界：实测 92248 B（ESP32-S3），主要是 RpcReassembler
+// 约 33 KiB、SyncEngine 约 35 KiB、RPC 收发缓冲约 15 KiB。每实例另有帧队列
+// （默认 3×8×约 2 KiB）、每个连接槽 TcpConn 约 12 KiB、任务栈 24 KiB；
+// 文本字段按实际长度在堆上分配。建议启用 PSRAM。
 static_assert(sizeof(Context) < 112 * 1024, "Context 常驻内存超出预算，请检查新增缓冲");
 
 }  // namespace

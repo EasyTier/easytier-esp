@@ -157,7 +157,7 @@ RpcReassembleResult RpcReassembler::feed(uint32_t generation, const RpcPacketRef
     const uint32_t total = packet.total_pieces;
     const uint32_t idx = packet.piece_idx;
 
-    // 历史单包：total_pieces == 0 且 piece_idx == 0。
+    // 旧版单包：total_pieces == 0 且 piece_idx == 0。
     if (total == 0) {
         if (idx != 0) {
             return RpcReassembleResult::Rejected;
