@@ -184,35 +184,46 @@ Topology::MergeResult Topology::merge_conn_row(uint32_t peer_id, uint32_t versio
     return MergeResult::Updated;
 }
 
-/** @brief 过期清理：90 秒退出建图/邻接失效，3600 秒彻底删除。 */
-void Topology::expire(uint32_t now_ms) noexcept {
+/**
+ * @brief 清理死亡节点与长时间不可达节点。
+ * @details 与上游一致：90s 只清理"图中不可达"的节点，3660s 无条件删除死亡节点；
+ *          可达节点不会因为最后更新时间旧而被踢出建图。自身与邻接行不做时间清理。
+ */
+void Topology::expire(uint32_t now_ms, uint32_t self_peer_id, PeerReachableFn reachable,
+                      const void* reachable_ctx) noexcept {
+    // 启动/reset 瞬态下自身可能还没进入拓扑：此时快照为空，不做不可达裁剪。
+    const bool self_known = find_peer(self_peer_id) != nullptr;
     for (size_t i = 0; i < peer_count_;) {
         TopoPeer& peer = peers_[i];
-        // 时间戳可能比本轮 now 略晚（RPC 回调里重新取了 now_ms()）；expired() 用
-        // 有符号比较，不会把刚合并的条目回绕成"已过期"。
-        if (expired(now_ms, peer.last_update_ms, kTopoPeerRemoveMs)) {
-            ET_LOGI(kTag, "removing expired peer %u", static_cast<unsigned>(peer.peer_id));
-            peers_[i] = peers_[peer_count_ - 1];
-            peers_[--peer_count_] = TopoPeer{};
-            dirty_ = true;
-            continue;  // 槽位被替换，重新检查同一位置
-        }
-        if (peer.in_graph && expired(now_ms, peer.last_update_ms, kTopoPeerStaleMs)) {
-            ET_LOGW(kTag, "peer %u left the graph (stale)", static_cast<unsigned>(peer.peer_id));
-            peer.in_graph = false;
-            dirty_ = true;
-        }
-        ++i;
-    }
-    for (size_t i = 0; i < row_count_;) {
-        TopoConnRow& row = rows_[i];
-        if (expired(now_ms, row.last_update_ms, kTopoConnStaleMs)) {
-            rows_[i] = rows_[row_count_ - 1];
-            rows_[--row_count_] = TopoConnRow{};
-            dirty_ = true;
+        if (peer.peer_id == self_peer_id) {
+            ++i;  // 自身永不过期
             continue;
         }
-        ++i;
+        // 时间戳只是"最后一次版本更新"，不是心跳：只有死亡删除和不可达清理两种。
+        const bool dead = expired(now_ms, peer.last_update_ms, kTopoPeerRemoveMs);
+        const bool unreachable =
+            !dead && self_known && reachable != nullptr &&
+            !reachable(reachable_ctx, peer.peer_id) &&
+            expired(now_ms, peer.last_update_ms, kTopoUnreachableRemoveMs);
+        if (!dead && !unreachable) {
+            ++i;
+            continue;
+        }
+        ET_LOGI(kTag, "removing %s peer %u", dead ? "dead" : "unreachable",
+                static_cast<unsigned>(peer.peer_id));
+        // 先删该节点的邻接行，再删节点（swap-with-last，避免遍历失效）。
+        for (size_t r = 0; r < row_count_;) {
+            if (rows_[r].peer_id != peer.peer_id) {
+                ++r;
+                continue;
+            }
+            rows_[r] = rows_[row_count_ - 1];
+            rows_[--row_count_] = TopoConnRow{};
+        }
+        peers_[i] = peers_[peer_count_ - 1];
+        peers_[--peer_count_] = TopoPeer{};
+        dirty_ = true;
+        // 槽位被替换，重新检查同一位置
     }
 }
 

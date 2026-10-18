@@ -3,3 +3,7 @@
 # 可同时连接的入口数由 Kconfig `EASYTIER_ESP_MAX_CONNECTED_PEERS` 决定（上限 8），
 # 加上应用自身的 socket 以及 lwIP 内部占用，默认的 10 个 socket 不够用，这里提高上限。
 CONFIG_LWIP_MAX_SOCKETS=24
+
+# 组网初始化（TOML 递归下降解析 + Inst 构造 + 密钥派生）放在 app_main 中执行，
+# 默认 3584 B 的 main 任务栈不够，这里提高到 8 KiB。
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192

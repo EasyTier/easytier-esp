@@ -472,6 +472,11 @@ void Context::run_proto() noexcept {
     while (!stop_requested.load()) {
         const uint32_t now = now_ms();
 
+        // 0) 自身信息心跳（对齐上游 3600s）：版本变化后立即触发一次同步通告。
+        if (sync.refresh_self_info(now)) {
+            last_sync_ms = 0;
+        }
+
         // 1) 应用命令：连接开关（由控制面单写 connection_enabled）。
         SmallMessage app{};
         for (size_t n = 0; n < kMaxMessagesPerLoop &&

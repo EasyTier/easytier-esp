@@ -7,7 +7,8 @@
  * - `version == 0` 的节点只作为占位记录（用于请求缺片信息），**不参与建图**；
  * - 每个节点的原始 `RoutePeerInfo` 字节会被有界保留，便于在转发时保留未知字段；
  * - 容量不足时明确拒绝更新（RejectedFull），不会静默丢弃后仍报告成功；
- * - 节点超过 90 秒无更新则退出建图，超过 3600 秒彻底删除；邻接行同样按 90 秒失效。
+ * - 节点"不可达"超过 90 秒才删除；超过 3660 秒无更新（死亡）无条件删除；
+ *   邻接行不做时间清理，只在节点被删除时一并移除。
  */
 #pragma once
 
@@ -22,12 +23,16 @@ namespace et {
 
 /** @brief 无效 peer id（0 不是合法节点）。 */
 inline constexpr uint32_t kInvalidPeerId = 0;
-/** @brief 节点信息退出建图的时间（毫秒）。 */
-inline constexpr uint32_t kTopoPeerStaleMs = 90 * 1000;
-/** @brief 节点信息彻底删除的时间（毫秒）。 */
-inline constexpr uint32_t kTopoPeerRemoveMs = 3600 * 1000;
-/** @brief 邻接行的失效时间（毫秒）。 */
-inline constexpr uint32_t kTopoConnStaleMs = 90 * 1000;
+/** @brief 节点"不可达"状态下保留的时间（毫秒），对齐上游 90s。 */
+inline constexpr uint32_t kTopoUnreachableRemoveMs = 90 * 1000;
+/**
+ * @brief 节点信息彻底删除的时间（毫秒），对齐上游 3660s。
+ * @details 上游每个节点每 3600s 刷新一次自身信息版本；这里留 60s 传播余量。
+ */
+inline constexpr uint32_t kTopoPeerRemoveMs = 3660 * 1000;
+
+/** @brief 可达性查询回调：peer 在当前路由快照中是否有下一跳。 */
+using PeerReachableFn = bool (*)(const void* ctx, uint32_t peer_id);
 
 /** @brief 拓扑中的一个节点。 */
 struct TopoPeer {
@@ -39,7 +44,7 @@ struct TopoPeer {
     uint16_t feature_flags = 0;         ///< 能力位（见 peer_feature）
     uint64_t peer_route_id = 0;         ///< 节点路由 id
     uint32_t last_update_ms = 0;        ///< 最近一次更新的本地时间
-    bool in_graph = false;              ///< 是否参与建图（version != 0 且未过期）
+    bool in_graph = false;              ///< 是否参与建图（version != 0）
     std::array<uint8_t, kMaxRawRoutePeerInfoBytes> raw{};  ///< 原始 RoutePeerInfo 字节
     uint16_t raw_len = 0;                                  ///< 原始字节长度
 };
@@ -96,8 +101,15 @@ public:
     MergeResult merge_conn_row(uint32_t peer_id, uint32_t version, const uint32_t* connected,
                                size_t count, uint32_t now_ms) noexcept;
 
-    /** @brief 按时间清理过期节点与邻接行。 */
-    void expire(uint32_t now_ms) noexcept;
+    /**
+     * @brief 清理死亡节点与长时间不可达节点（邻接行不按时间清理）。
+     * @param now_ms 当前时间
+     * @param self_peer_id 本节点 id（自身永不过期）
+     * @param reachable 可达性查询回调，可为空（为空时只做死亡删除）
+     * @param reachable_ctx 回调上下文
+     */
+    void expire(uint32_t now_ms, uint32_t self_peer_id, PeerReachableFn reachable,
+                const void* reachable_ctx) noexcept;
 
     /** @brief 拓扑是否发生了变化（需要重新计算路由）。 */
     [[nodiscard]] bool dirty() const noexcept { return dirty_; }

@@ -156,6 +156,12 @@ public:
     /** @brief 清理过期拓扑条目（控制面每轮调用；见 Topology::expire）。 */
     void expire_topology(uint32_t now) noexcept;
 
+    /**
+     * @brief 周期性刷新自身 RoutePeerInfo 版本（对齐上游 3600s 心跳）。
+     * @return 本次是否发生了版本刷新
+     */
+    bool refresh_self_info(uint32_t now) noexcept;
+
 private:
     /** @brief 构造/刷新本节点 RoutePeerInfo 的编码。 */
     bool build_self_info(uint32_t now) noexcept;
@@ -194,6 +200,7 @@ private:
     size_t active_peer_count_ = 0;  ///< 已握手直连对端数量
     uint64_t default_session_id_ = 0;  ///< 第一个直连对端的会话 id（兼容无目标的取用）
     uint32_t self_info_version_ = 1;     ///< 自身信息版本
+    uint32_t self_info_ms_ = 0;          ///< 自身信息最近一次构建时间（心跳基准）
     uint64_t self_peer_route_id_ = 0;    ///< 自身路由 id（整个生命周期固定）
     uint32_t conn_row_version_ = 1;      ///< 自身邻接行版本
     uint32_t my_ipv4_ = 0;               ///< 当前虚拟地址

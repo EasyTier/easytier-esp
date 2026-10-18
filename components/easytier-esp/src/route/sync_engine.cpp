@@ -8,11 +8,20 @@
 
 #include "support/log.hpp"
 #include "support/random.hpp"
+#include "support/time.hpp"
 
 namespace et {
 namespace {
 
 constexpr const char* kTag = "ET.SYNC";
+/// 自身信息版本心跳周期（对齐上游 UPDATE_PEER_INFO_PERIOD = 3600s）。
+constexpr uint32_t kSelfInfoRefreshMs = 3600 * 1000;
+
+/** @brief 供 Topology::expire 使用：当前路由快照里是否有该 peer 的下一跳。 */
+bool route_reachable(const void* ctx, uint32_t peer_id) {
+    const auto* table = static_cast<const RouteTable*>(ctx);
+    return table->snapshot().lookup_next_hop(peer_id) != kInvalidPeerId;
+}
 
 }  // namespace
 
@@ -41,6 +50,7 @@ void SyncEngine::reset() noexcept {
     active_peers_.fill(ActivePeer{});
     default_session_id_ = 0;
     self_info_version_ = 1;
+    self_info_ms_ = 0;
     conn_row_version_ = 1;
     self_peer_info_len_ = 0;
     direct_peer_count_ = 0;
@@ -77,6 +87,10 @@ void SyncEngine::on_peer_up(uint32_t remote_peer_id, uint64_t session_id,
         topology_.reset_peer(remote_peer_id);
         active_peers_[index].session_id = effective_session;
         ++self_info_version_;
+        // 版本变了就要重建编码，否则对端收到的仍是旧 version 的字节。
+        if (!build_self_info(now)) {
+            ET_LOGE(kTag, "cannot rebuild self route peer info after session change");
+        }
     } else {
         active_peers_[index].session_id = effective_session;
     }
@@ -163,6 +177,7 @@ bool SyncEngine::build_self_info(uint32_t now) noexcept {
         return false;
     }
     self_peer_info_len_ = static_cast<uint16_t>(len);
+    self_info_ms_ = now;  // 心跳基准：下一次周期刷新的起点
     return true;
 }
 
@@ -425,8 +440,28 @@ esp_err_t SyncEngine::handle_response(Bytes response, bool& need_resend) noexcep
     return ESP_OK;
 }
 
-/** @brief 清理过期拓扑条目。 */
-void SyncEngine::expire_topology(uint32_t now) noexcept { topology_.expire(now); }
+/** @brief 清理过期拓扑条目：90s 不可达 / 3660s 死亡（对齐上游语义）。 */
+void SyncEngine::expire_topology(uint32_t now) noexcept {
+    topology_.expire(now, my_peer_id_, &route_reachable, &table_);
+}
+
+/**
+ * @brief 周期性刷新自身信息版本（对齐上游 3600s 心跳）。
+ * @details 上游每 3600s 递增一次自身 RoutePeerInfo.version 并重新同步，让对端保存的
+ *          last_update 在 3660s 死亡删除前得到刷新；返回 true 时调用方应立即触发同步。
+ */
+bool SyncEngine::refresh_self_info(uint32_t now) noexcept {
+    if (self_info_ms_ != 0 && !expired(now, self_info_ms_, kSelfInfoRefreshMs)) {
+        return false;
+    }
+    ++self_info_version_;
+    if (!build_self_info(now)) {
+        ET_LOGE(kTag, "cannot refresh self route peer info");
+        return false;
+    }
+    topology_.set_self(my_peer_id_, my_ipv4_ != 0, my_ipv4_, now);
+    return true;
+}
 
 /** @brief 拓扑脏时重算路由。 */
 bool SyncEngine::recompute_if_dirty() noexcept {

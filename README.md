@@ -113,7 +113,7 @@ void start_easytier(std::string_view toml_text) {
     et::RuntimeOptions options{};
     options.on_event = &on_event;
 
-    // TOML 解析是递归下降，请在大栈任务里构造（示例用 8 KiB 任务）
+    // TOML 解析是递归下降，请在大栈任务里构造（示例把 main 任务栈提高到 8 KiB）
     g_inst.emplace(toml_text, options);
     if (!g_inst->valid()) {
         ESP_LOGE(TAG, "config rejected: 0x%x", g_inst->last_error());
@@ -164,12 +164,13 @@ enable_encryption = true
 
 `main/` 是一个可以直接 `idf.py build` 的示例工程：
 
-- `main.cpp`：NVS、`esp_netif`、WiFi STA 连接与自动重连；
-- `easytier_app.{hpp,cpp}`：把 `main/easytier.toml` 通过 `EMBED_TXTFILES` 内嵌
-  （文件不存在时只连 WiFi 并打印提示），在独立的 8 KiB 任务里构造 `et::Inst`、
-  `start()`、`connect()`；WiFi 事件回调里只调用 `connect()` / `disconnect()`；
-  启动时打印生效配置，之后每 10 秒打印一行状态；
-- `http_control.{hpp,cpp}`：演示用 HTTP 服务（GPIO38 电平翻转），与组网无关。
+- `main.cpp`：NVS、`esp_netif`、WiFi STA 连接/重连、内嵌 TOML 解析、`et::Inst`
+  构造/`start()`/`connect()`、断线处理与每 10 秒一次的状态打印，**全部在 `app_main`
+  （main 任务）里执行**；WiFi/IP 事件回调只更新连接标志、置事件位并重连 WiFi；
+- `http_control.{hpp,cpp}`：演示用 HTTP 服务（GPIO38 电平翻转），由
+  `esp_http_server` 创建唯一一个额外的应用任务，与组网无关。
 
-示例依赖 `easytier-esp` 组件与 `esp_wifi`/`esp_event`/`esp_netif`/`esp_timer`/
-`nvs_flash` 等；仓库不包含 `main/easytier.toml`，新克隆的仓库需要自行创建配置后再构建。
+示例依赖 `easytier-esp` 组件与 `esp_wifi`/`esp_event`/`esp_netif`/`nvs_flash` 等；
+由于 TOML 解析与 `Inst` 构造在 main 任务上进行，`sdkconfig.defaults` 把
+`CONFIG_ESP_MAIN_TASK_STACK_SIZE` 提高到 8192。仓库不包含 `main/easytier.toml`，
+新克隆的仓库需要自行创建配置后再构建。
