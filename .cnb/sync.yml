@@ -1,0 +1,51 @@
+# 同步流水线：CNB ↔ GitHub
+# - 任意分支 push：同步到 GitHub（force 强推）
+# - main 分支定时（凌晨 1 点）：从 GitHub 同步回本仓库，不允许 force
+# - main 分支网页按钮：从 GitHub 同步回本仓库，force 可选（按钮定义见 .cnb/web_trigger.yml）
+"**":
+  push:
+    - imports:
+        - https://cnb.cool/myqfeng/keys/-/blob/main/github.yml
+      stages:
+        - name: 同步代码到 GitHub
+          image: tencentcom/git-sync
+          settings:
+            target_url: https://github.com/easytier/easytier-esp.git
+            auth_type: https
+            username: ${GIT_USERNAME}
+            password: ${GIT_ACCESS_TOKEN}
+            sync_mode: push
+            force: true
+            push_tags: true
+
+main:
+  # 每天凌晨 1 点（Asia/Shanghai）定时从 GitHub 同步回本仓库，不允许 force
+  "crontab: 0 1 * * *":
+    - imports:
+        - https://cnb.cool/myqfeng/keys/-/blob/main/github.yml
+      stages:
+        - name: 从 GitHub 同步代码
+          image: tencentcom/git-sync
+          settings:
+            target_url: https://github.com/easytier/easytier-esp.git
+            auth_type: https
+            username: ${GIT_USERNAME}
+            password: ${GIT_ACCESS_TOKEN}
+            sync_mode: pull
+            force: false
+            push_tags: true
+  # 网页按钮手动触发：force 由按钮输入可选开启
+  web_trigger_sync_from_github:
+    - imports:
+        - https://cnb.cool/myqfeng/keys/-/blob/main/github.yml
+      stages:
+        - name: 从 GitHub 同步代码
+          image: tencentcom/git-sync
+          settings:
+            target_url: https://github.com/easytier/easytier-esp.git
+            auth_type: https
+            username: ${GIT_USERNAME}
+            password: ${GIT_ACCESS_TOKEN}
+            sync_mode: pull
+            force: ${FORCE}
+            push_tags: true

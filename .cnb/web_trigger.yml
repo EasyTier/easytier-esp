@@ -1,0 +1,20 @@
+# 网页按钮配置：代码-分支详情页展示「从 GitHub 同步」按钮
+# 按钮触发的事件名对应 .cnb.yml 中 main 分支下的 web_trigger_sync_from_github
+branch:
+  - reg: ^main$
+    buttons:
+      - name: 从 GitHub 同步
+        description: 拉取 GitHub 仓库代码同步到本仓库（可选拒绝历史覆盖/force）
+        event: web_trigger_sync_from_github
+        inputs:
+          FORCE:
+            name: 强制同步（force）
+            description: 开启后强制覆盖本仓库为 GitHub 侧内容，可能丢弃本仓库独有提交
+            type: switch
+            default: "false"
+            required: true
+            options:
+              - name: 关闭
+                value: "false"
+              - name: 开启
+                value: "true"

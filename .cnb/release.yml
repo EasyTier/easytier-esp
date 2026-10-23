@@ -1,0 +1,35 @@
+# 发版流水线：v 开头语义化版本分支（如 v0.0.3）push 触发：打 Tag、发布 Release、上传组件到 ESP 组件注册表
+"v*":
+  push:
+    - stages:
+        # 从分支名提取版本号：v0.0.3 -> 0.0.3
+        - name: 解析版本号
+          script: echo "##[set-output VERSION=${CNB_BRANCH#v}]"
+          exports:
+            VERSION: VERSION
+        # 提取 CHANGELOG.md 最新一段（以 "---" 分隔）；失败则用占位内容，不中断发布流程
+        - name: 提取最新版本 Changelog
+          script: |
+            if [ -f CHANGELOG.md ]; then
+              awk '/^---[[:space:]]*$/{exit} {print}' CHANGELOG.md | sed '/./,$!d' > release_note.md
+            fi
+            if [ ! -s release_note.md ]; then
+              echo "提取 Changelog 失败，使用占位 Changelog 继续发布"
+              echo "Release $VERSION" > release_note.md
+            fi
+        # Tag 与 Release 标题均使用不带 v 的版本号，不上传附件
+        - name: 发布 Release
+          type: git:release
+          options:
+            tag: $VERSION
+            title: $VERSION
+            descriptionFromFile: release_note.md
+        # 发布组件到 ESP Component Registry（namespace: myqfeng，name: easytier-esp）
+        - name: 发布组件到 ESP Component Registry
+          image: python:3.11-slim
+          imports:
+            - https://cnb.cool/myqfeng/keys/-/blob/main/esp.yml
+          script: |
+            pip install --quiet -i https://mirrors.cloud.tencent.com/pypi/simple idf-component-manager
+            cd components/easytier-esp
+            compote component upload --namespace myqfeng --name easytier-esp
