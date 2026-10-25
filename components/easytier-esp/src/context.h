@@ -26,6 +26,7 @@
 #include "route/sync_engine.hpp"
 #include "route/table.hpp"
 #include "route/topology.hpp"
+#include "transport/conn_slot.hpp"
 
 #if defined(ESP_PLATFORM)
 #include "freertos/FreeRTOS.h"
@@ -35,9 +36,6 @@
 #endif
 
 namespace et {
-
-/** @brief TCP 传输对象（仅 I/O 任务使用）。 */
-class TcpConn;
 
 /// 支持的最大并发入口连接数（Kconfig `EASYTIER_ESP_MAX_CONNECTED_PEERS`，默认 6）。
 /// 配置里可以写任意多个入口，多出的入口作为轮换备用。
@@ -71,13 +69,6 @@ struct FrameMessage {
     std::array<uint8_t, kMaxTcpBodyLen> data{};  ///< PM 头 + payload
 };
 
-/** @brief 一个连接槽的共享状态（I/O 任务管理生命周期，控制面读写 peer id）。 */
-struct ConnSlot {
-    TcpConn* conn = nullptr;              ///< 连接对象（堆分配，含收发缓冲）
-    std::atomic<uint32_t> peer_id{0};     ///< 握手后的对端 peer id（0 = 未握手/未知）
-    std::atomic<uint32_t> generation{0};  ///< 该槽当前代际（0 = 空闲）
-};
-
 /** @brief 队列中传递的小消息（事件/命令）。 */
 struct SmallMessage {
     uint8_t kind = 0;         ///< IoEvent / IoCommand / AppCommand
@@ -85,19 +76,6 @@ struct SmallMessage {
     uint32_t generation = 0;  ///< 连接代际（事件使用）
 };
 
-/// I/O 任务重连退避起点（毫秒）。
-inline constexpr uint32_t kInitialBackoffMs = 1000;
-/// I/O 任务重连退避上限（毫秒）。
-inline constexpr uint32_t kMaxBackoffMs = 30000;
-
-/** @brief 一个连接槽的 I/O 任务私有状态（仅 I/O 任务访问）。 */
-struct SlotState {
-    size_t peer_index = 0;                        ///< 该槽当前使用的配置入口下标
-    uint32_t backoff_ms = kInitialBackoffMs;      ///< 该槽的重连退避
-    uint32_t retry_at_ms = 0;  ///< 独立重试截止时间，等待期间仍服务其它连接
-    bool connecting = false;                      ///< 是否正在非阻塞连接中
-    bool session_open = false;                    ///< 是否已建立过 TCP 会话
-};
 #endif
 
 /**
@@ -145,26 +123,28 @@ private:
 
 #if defined(ESP_PLATFORM)
     // ---- 任务入口（平台回调必须是普通函数指针，因此保持 static 适配器）----------------
-    static void io_entry(void* arg) noexcept;     ///< xTaskCreate 入口 → run_io()
-    static void proto_entry(void* arg) noexcept;  ///< xTaskCreate 入口 → run_proto()
-    static void data_entry(void* arg) noexcept;   ///< xTaskCreate 入口 → run_data()
+    static void io_entry(void* arg) noexcept;     ///< xTaskCreate 入口 → run_io_task()
+    static void proto_entry(void* arg) noexcept;  ///< xTaskCreate 入口 → run_proto_task()
+    static void data_entry(void* arg) noexcept;   ///< xTaskCreate 入口 → run_data_task()
     static void post_frame_cb(void* arg, Bytes body) noexcept;  ///< TcpConn 读回调适配器
     static esp_err_t handle_ospf_sync_cb(void* ctx_ptr, Bytes request, MutBytes response,
                                          size_t& response_len) noexcept;  ///< RPC 服务回调
 
     // ---- 任务主循环（非静态，直接使用 this）-------------------------------------------
-    void run_io() noexcept;     ///< I/O 任务主循环（定义见 tasks/io_task.cpp）
-    void run_proto() noexcept;  ///< 控制面任务主循环（定义见 tasks/proto_task.cpp）
-    void run_data() noexcept;   ///< 数据面任务主循环（定义见 tasks/data_task.cpp）
+    void run_io_task() noexcept;     ///< I/O 任务主循环（定义见 tasks/io_task.cpp）
+    void run_proto_task() noexcept;  ///< 控制面任务主循环（定义见 tasks/proto_task.cpp）
+    void run_data_task() noexcept;   ///< 数据面任务主循环（定义见 tasks/data_task.cpp）
 
     // I/O 任务
-    void advance_peer_index(size_t& index) const noexcept;
+    /** @brief 计算轮换后的入口下标；入口列表为空时返回 0。 */
+    [[nodiscard]] size_t next_peer_index(size_t index) const noexcept;
     void post_event(IoEvent kind, uint8_t slot, uint32_t generation) noexcept;
+    /** @brief 实例允许连接且指定接收代际已通过握手，才允许 Data 入队或消费。 */
+    [[nodiscard]] bool data_generation_authenticated(uint32_t generation) const noexcept;
     void post_frame(uint32_t generation, Bytes body) noexcept;
-    bool select_entry(const std::array<SlotState, kMaxConnSlots>& states, size_t slot,
-                      size_t& index) const noexcept;
-    void drop_slot(size_t slot, SlotState& st) noexcept;
-    void pump_tx(std::array<SlotState, kMaxConnSlots>& states) noexcept;
+    bool select_entry(size_t slot, size_t& index) const noexcept;
+    void drop_slot(size_t slot) noexcept;
+    void pump_tx() noexcept;
 
     // 控制面任务
     bool send_frame(uint32_t generation, Bytes body) noexcept;

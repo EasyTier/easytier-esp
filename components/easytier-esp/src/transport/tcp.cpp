@@ -12,7 +12,7 @@
 namespace et {
 namespace {
 
-constexpr const char* kTag = "ET.TCP";
+constexpr const char* kTag = "ET.TRANSPORT.TCP";
 
 /** @brief 把 string_view 复制到定长缓冲并 NUL 结尾。 */
 [[nodiscard]] bool copy_cstr(std::string_view src, char* dst, size_t cap) noexcept {

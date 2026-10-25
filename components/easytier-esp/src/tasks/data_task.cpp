@@ -30,8 +30,11 @@ constexpr size_t kMaxIpPacket = 1600;
 
 }  // namespace
 
-/** @brief xTaskCreate 入口：转调非静态主循环（FreeRTOS 只接受普通函数指针）。 */
-void Context::data_entry(void* arg) noexcept { static_cast<Context*>(arg)->run_data(); }
+/** @brief xTaskCreate 入口：运行主循环，退出后自删任务，禁止返回 FreeRTOS 包装器。 */
+void Context::data_entry(void* arg) noexcept {
+    static_cast<Context*>(arg)->run_data_task();
+    vTaskDelete(nullptr);
+}
 
 /** @brief 投递一个 IP 报文到 lwIP（成功后 pbuf 所有权归 TCPIP 线程）。 */
 void Context::deliver_to_netif(Bytes ip_packet) noexcept {
@@ -160,6 +163,11 @@ void Context::handle_netif_output(const NetifRxItem& item) noexcept {
 
 /** @brief 处理入站 Data 帧：本机投递或按下一跳转发。 */
 void Context::handle_inbound_data(FrameMessage& frame) noexcept {
+    // 排队期间可能断线或换代，消费前再次核对接收权限。
+    if (!data_generation_authenticated(frame.generation)) {
+        dropped.fetch_add(1);
+        return;
+    }
     PeerManagerHeader hdr{};
     if (!decode_peer_manager_header(Bytes(frame.data.data(), kPeerManagerHeaderSize), hdr)) {
         dropped.fetch_add(1);
@@ -212,7 +220,7 @@ void Context::handle_inbound_data(FrameMessage& frame) noexcept {
 }
 
 /** @brief 数据面任务主循环。 */
-void Context::run_data() noexcept {
+void Context::run_data_task() noexcept {
     while (!stop_requested.load()) {
         // 1) 路由快照：长度 1 邮箱，按值复制为自己的只读副本。
         RouteSnapshot snapshot{};

@@ -26,7 +26,7 @@
 namespace et {
 namespace {
 
-constexpr const char* kTag = "ET.PROTO";
+constexpr const char* kTag = "ET.TASKSe.PROTO";
 /// 控制面循环周期（毫秒）。
 constexpr uint32_t kLoopPeriodMs = 5;
 // 100 Hz 时 5 ms 被 pdMS_TO_TICKS 截为 0；vTaskDelay(0) 不能让低优先级 IDLE 运行。
@@ -47,8 +47,11 @@ constexpr uint32_t kMinReverseSyncMs = 1000;
 
 }  // namespace
 
-/** @brief xTaskCreate 入口：转调非静态主循环（FreeRTOS 只接受普通函数指针）。 */
-void Context::proto_entry(void* arg) noexcept { static_cast<Context*>(arg)->run_proto(); }
+/** @brief xTaskCreate 入口：运行主循环，退出后自删任务，禁止返回 FreeRTOS 包装器。 */
+void Context::proto_entry(void* arg) noexcept {
+    static_cast<Context*>(arg)->run_proto_task();
+    vTaskDelete(nullptr);
+}
 
 /** @brief 把一帧投递给 I/O 任务发送（带代际，旧代际会被丢弃）。 */
 bool Context::send_frame(uint32_t generation, Bytes body) noexcept {
@@ -148,6 +151,9 @@ bool Context::send_rpc_message(uint32_t generation, const RpcSendTemplate& tmpl,
  * @param generation 该槽当前的会话代际（I/O 任务据此定位槽位）
  */
 void Context::request_reconnect(uint32_t generation) noexcept {
+    if (generation != 0) {
+        for (ConnSlot& slot : slots) slot.revoke_receive(generation);
+    }
     SmallMessage msg{};
     msg.kind = static_cast<uint8_t>(IoCommand::Reconnect);
     msg.generation = generation;
@@ -404,7 +410,7 @@ void Context::handle_rpc_response(uint32_t generation, const RpcPacketRef& packe
 }
 
 /** @brief 控制面任务主循环。 */
-void Context::run_proto() noexcept {
+void Context::run_proto_task() noexcept {
 
     HandshakeExpectation expect{};
     expect.network_name = settings.network_name;
@@ -446,6 +452,9 @@ void Context::run_proto() noexcept {
     /** @brief 复位某个槽的会话状态（断开/超时/换入口时调用）。 */
     const auto reset_slot = [this, &peer_up, &session_generation, &handshake_sent,
                              &keepalive, &publish_direct_peers](size_t slot) {
+        if (session_generation[slot] != 0) {
+            slots[slot].revoke_receive(session_generation[slot]);
+        }
         const uint32_t peer_id = slots[slot].peer_id.load();
         if (peer_up[slot] && peer_id != 0) {
             sync.on_peer_down(peer_id);
@@ -571,6 +580,11 @@ void Context::run_proto() noexcept {
                         ET_LOGE(kTag, "handshake rejected: %d", static_cast<int>(result));
                         set_error(ESP_ERR_INVALID_RESPONSE);
                         request_reconnect(session_generation[slot]);
+                        break;
+                    }
+                    // 原子地授权仍在等待握手的会话；断线或换代后迟到的握手不能放行 Data。
+                    if (!slots[slot].authenticate_receive(session_generation[slot])) {
+                        dropped.fetch_add(1);
                         break;
                     }
                     slots[slot].peer_id.store(remote);

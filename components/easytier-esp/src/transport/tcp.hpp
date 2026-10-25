@@ -19,16 +19,9 @@
 #include "protocol/wire.hpp"
 #include "support/bytes.hpp"
 #include "support/net.hpp"
+#include "transport/conn_slot.hpp"
 
 namespace et {
-
-/** @brief 连接建立状态。 */
-enum class ConnectState : uint8_t {
-    Idle,        ///< 尚未发起连接
-    InProgress,  ///< 非阻塞连接进行中
-    Connected,   ///< 已建立
-    Failed,      ///< 建立失败
-};
 
 /**
  * @brief 单条 TCP 隧道连接。

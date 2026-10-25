@@ -15,7 +15,6 @@
 #include "support/config_limits.hpp"
 #include "support/log.hpp"
 #include "support/random.hpp"
-#include "transport/tcp.hpp"
 
 #if defined(ESP_PLATFORM)
 #include "freertos/FreeRTOS.h"
@@ -186,13 +185,10 @@ esp_err_t Context::create_runtime() noexcept {
     // 每个连接槽一个 TcpConn（各含约 12 KiB 收发缓冲）。必须显式分配：对象较大，
     // 不能放在任务栈上；缺少分配时 I/O 任务会直接报错退出（连不上任何入口）。
     for (size_t i = 0; i < kMaxConnSlots; ++i) {
-        if (slots[i].conn == nullptr) {
-            slots[i].conn = new (std::nothrow) TcpConn();
-            if (slots[i].conn == nullptr) {
-                ET_LOGE(kTag, "TcpConn slot %u allocation failed (needs ~12 KiB each)",
-                        static_cast<unsigned>(i));
-                return ESP_ERR_NO_MEM;
-            }
+        if (!slots[i].allocate()) {
+            ET_LOGE(kTag, "TcpConn slot %u allocation failed (needs ~12 KiB each)",
+                    static_cast<unsigned>(i));
+            return ESP_ERR_NO_MEM;
         }
     }
 
@@ -299,10 +295,7 @@ void Context::release_runtime() noexcept {
     delete data_cipher;
     data_cipher = nullptr;
     for (size_t i = 0; i < kMaxConnSlots; ++i) {
-        delete slots[i].conn;
-        slots[i].conn = nullptr;
-        slots[i].peer_id.store(0);
-        slots[i].generation.store(0);
+        slots[i].release();
     }
 }
 #else

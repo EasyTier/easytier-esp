@@ -8,6 +8,7 @@ idf_component_register(
         "src/protocol/protobuf.cpp"
         "src/protocol/messages.cpp"
         "src/transport/tcp.cpp"
+        "src/transport/conn_slot.cpp"
         "src/peer/handshake.cpp"
         "src/peer/keepalive.cpp"
         "src/rpc/fragment.cpp"
