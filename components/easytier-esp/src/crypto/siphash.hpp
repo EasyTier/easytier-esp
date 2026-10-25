@@ -9,7 +9,8 @@
  * @note finish() 不修改状态，可以连续多次调用后再继续 write()，这与 Rust
  *       Hasher 的语义一致，也是密钥派生算法正确性的前提。
  */
-#pragma once
+#ifndef EASYTIER_ESP_CRYPTO_SIPHASH_HPP_
+#define EASYTIER_ESP_CRYPTO_SIPHASH_HPP_
 
 #include <cstdint>
 #include <span>
@@ -61,3 +62,5 @@ private:
 };
 
 }  // namespace et
+
+#endif

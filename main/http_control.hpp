@@ -8,7 +8,8 @@
  *          改成 POST 或只在虚拟接口上暴露。
  * @warning GPIO38 必须为本板空闲引脚；换脚前核对模组手册。
  */
-#pragma once
+#ifndef EASYTIER_ESP_HTTP_CONTROL_HPP_
+#define EASYTIER_ESP_HTTP_CONTROL_HPP_
 
 #include "esp_err.h"
 
@@ -24,3 +25,5 @@ namespace http_control {
 esp_err_t start() noexcept;
 
 }  // namespace http_control
+
+#endif

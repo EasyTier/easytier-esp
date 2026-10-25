@@ -9,16 +9,28 @@
 
 ## 项目定位与目录
 
-本项目把 ESP32 接入既有 EasyTier 网络，组件只适配 **ESP-IDF 6.1.x**，当前目标为 ESP32-S3。C++20，命名空间 `et`。**公开 API 只有一个类 `et::Inst`**（RAII）：构造函数直接接收 TOML 文本，内部完成解析、身份补齐、结构校验与资源分配（上下文、队列、任务、socket、虚拟网卡），析构自动停止并释放。**没有配置类**：全部设置项仍是实例的私有实现（`et::Settings` 数据体定义在公开头，但只能由 TOML 构造，用 `std::string`/`std::vector`），构造后不可修改；`get_config_info()` 返回一份 `Settings` 深拷贝（`network_secret` 恒为空）。**解析诊断不缓存**：真正失败（支持的字段类型/取值错误、peer 非法、语法/资源超限）用 Error 日志直接输出，接口只返回错误码；不支持的字段不解析也不报错。**允许多个 `et::Inst` 并存**，组件内部不得引入文件级实例状态；**不要引入 C 包装层或 `Node` 层**。配置**只走 TOML**：不要加编程式 setter；每次构造都是“缺省值 + TOML”的全量替换，因此未显式给出的 `instance_id`/`hostname`/`instance_name` 每次都会重新生成。组件禁用异常与 RTTI，构造不能返回错误码，失败用 `valid()`/`last_error()` 查询；设置文本用 `std::string`，分配失败会终止进程（不再有字段级 `ESP_ERR_NO_MEM`）。
+本项目把 ESP32 接入既有 EasyTier 网络，组件只适配 **ESP-IDF 6.1.x**，当前目标为 ESP32-S3。C++20，命名空间 `et`。**公开 API 只有一个类 `et::Inst`**（RAII）：构造函数直接接收 TOML 文本，内部完成解析、身份补齐、结构校验，并分配运行上下文（含每个连接槽的 TCP 收发缓冲）；队列、任务与虚拟网卡由 `start()` 创建，析构自动停止并释放。**没有配置类**：全部设置项仍是实例的私有实现（`et::Settings` 数据体定义在公开头，但只能由 TOML 构造，用 `std::string`/`std::vector`），构造后不可修改；`get_config_info()` 返回一份 `Settings` 深拷贝（`network_secret` 恒为空）。**解析诊断不缓存**：真正失败（支持的字段类型/取值错误、peer 非法、语法/资源超限）用 Error 日志直接输出，接口只返回错误码；不支持的字段不解析也不报错。**允许多个 `et::Inst` 并存**，组件内部不得引入文件级实例状态；**不要引入 C 包装层或 `Node` 层**。配置**只走 TOML**：不要加编程式 setter；每次构造都是“缺省值 + TOML”的全量替换，因此未显式给出的 `instance_id`/`hostname`/`instance_name` 每次都会重新生成。组件禁用异常与 RTTI，构造不能返回错误码，失败用 `valid()`/`last_error()` 查询；设置文本用 `std::string`，分配失败会终止进程（不再有字段级 `ESP_ERR_NO_MEM`）。
 
 - `components/easytier-esp/include/easytier-esp.hpp`：公开 C++ API —— `Inst` 类、只读的 `Settings`/`PeerEndpoint` 快照、`Status`/`Event` 类型。
 - `components/easytier-esp/src/`：组件实现；`config/`、`crypto/`、`protocol/`、`transport/`、`peer/`、`rpc/`、`route/`、`netif/`、`data/`、`tasks/` 为主要模块。
-- `inst.cpp` / `context.h` / `context.cpp`：`Inst` 只负责 TOML→`Settings`→持有 `Context`，并用 `friend` 读取状态/配置快照；`Context` 是 RAII 类，**数据成员全部 private**，构造即准备（拷贝设置、派生密钥），独占队列、任务、连接槽、AEAD、虚拟网卡与密钥，`start`/`stop`/析构在 `context.cpp`。三个任务实现（含 helper）是 `Context` 的私有成员函数（用 `this` 访问状态），定义仍在 tasks 目录的 `*_task.cpp`；只有 xTaskCreate/TcpConn/RPC 回调所需的 5 个入口保留 static 适配器。
-- `tasks/io_task.cpp`：socket 的唯一所有者；并发连接槽数量由 Kconfig `EASYTIER_ESP_MAX_CONNECTED_PEERS`（默认 6）决定，**入口条目数不设上限**，其余入口轮换备用。不能把一个入口重复连接到两个槽，重试不得阻塞已有连接的收发。
+- `inst.cpp` / `context.h` / `context.cpp`：`Inst` 只负责 TOML→`Settings`→持有 `Context`，并用 `friend` 读取状态/配置快照；`Context` 是 RAII 类，**数据成员全部 private**，构造即准备（拷贝设置、派生密钥、由 `ConnSlot` 分配 TCP 缓冲），独占队列、任务、连接槽、AEAD、虚拟网卡与密钥；`start()` 创建队列/任务/网卡，`stop`/析构在 `context.cpp`。三个任务实现（含 helper）是 `Context` 的私有成员函数（用 `this` 访问状态），定义仍在 tasks 目录的 `*_task.cpp`；只有 xTaskCreate/TcpConn/RPC 回调所需的 5 个入口保留 static 适配器。
+- `tasks/io_task.cpp`：所有 socket 的唯一使用者（建连、读写、关闭都只在此任务），连接槽（`transport/conn_slot.*`）持有 TCP 缓冲与重连退避；并发连接槽数量由 Kconfig `EASYTIER_ESP_MAX_CONNECTED_PEERS`（默认 6）决定，**入口条目数不设上限**，其余入口轮换备用。不能把一个入口重复连接到两个槽，重试不得阻塞已有连接的收发。
 - `tasks/proto_task.cpp`：握手、保活、RPC、路由同步和路由快照发布；`tasks/data_task.cpp`：虚拟网卡数据、加解密与中继转发。
-- `main/`：应用示例，仅负责 NVS、事件循环、WiFi、加载 TOML 和连接控制（`connect()`/`disconnect()`），不放协议实现。
+- `main/`：应用示例，负责 NVS、事件循环、WiFi、加载嵌入 TOML、连接控制（`connect()`/`disconnect()`）以及联调用的 HTTP 控制（`http_control.*`：监听 80 端口，`GET /` 与 `/toggle` 翻转 GPIO38；无鉴权、GET 带副作用，仅用于联调），不放协议实现。WiFi 凭据走 Kconfig `EXAMPLE_WIFI_SSID`/`EXAMPLE_WIFI_PASSWORD`；`EXAMPLE_EASYTIER_TOML_ENABLED=n` 时只连 WiFi。
 - 当前工作区没有 `tests/` 或 `test_apps/`；旧文档中的测试记录不能作为当前可执行入口，不要自行恢复用户移除的目录。
-- `docs/`：原 `遗留问题清单.md`、`硬件联调指南`、`验收证据清单` 已按用户要求从工作树移除（需要时从提交历史取回）；根目录 `README.md` 为唯一使用入口（组件目录不再放 README）。
+- `docs/`：原 `遗留问题清单.md`、`硬件联调指南`、`验收证据清单` 已按用户要求从工作树移除（需要时从提交历史取回），目录当前为空。根目录 `README.md` 是完整使用入口；`components/easytier-esp/README.md` 是面向组件注册表的精简副本（只保留简介与目录结构），修改使用说明时同步两边。
+
+## 组件配置项
+
+`components/easytier-esp/Kconfig`（menuconfig 的 `EasyTier-ESP` 菜单；宿主默认值在 `src/support/config_limits.hpp`，两处需同步）：
+
+- 日志：`EASYTIER_ESP_LOG_LEVEL`（编译期裁剪，默认 Info，可关到 Closed）。
+- 连接：`EASYTIER_ESP_MAX_CONNECTED_PEERS`（1..8，默认 6；只限制同时连接数，入口条目本身无上限；每槽约 12 KiB TCP 缓冲）。
+- RPC：`EASYTIER_ESP_RPC_MAX_TRANSACTIONS`（默认 4）、`EASYTIER_ESP_RPC_REASSEMBLY_SLOTS`（默认 2）。
+- 任务栈/优先级：`EASYTIER_ESP_{IO,PROTO,DATA}_TASK_STACK`（默认 6144/10240/8192 字节）、`..._PRIORITY`（7/5/7，必须低于 WiFi/TCPIP）。
+- 队列深度：`..._QUEUE_{RX_CTRL,TX,RX_DATA,SMALL}_DEPTH`（均 8）、`..._QUEUE_NETIF_DEPTH`（16）；`q_snapshot` 固定深度 1（只保留最新路由快照）。
+
+示例工程另见 `main/Kconfig.projbuild`（`EXAMPLE_WIFI_SSID`/`EXAMPLE_WIFI_PASSWORD`/`EXAMPLE_WIFI_MAX_RETRY`/`EXAMPLE_EASYTIER_TOML_ENABLED`）与 `sdkconfig.defaults`（`CONFIG_LWIP_MAX_SOCKETS=24`、`CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192`，因为 TOML 解析与实例构造在 main 任务栈上）。Kconfig 的 range 之外还有 `config_limits.hpp` 的 `static_assert` 守卫，直接改 sdkconfig 越界会编译失败。
 
 ## 上游与兼容行为
 
@@ -46,7 +58,14 @@ source ~/.espressif/tools/activate_idf_v6.1.sh
 
 直接使用 IDF 命令验证，检查真实退出码；不要以日志字符串匹配代替命令成功，也不要在构建失败后运行陈旧二进制。`tools/` 只保留栈分析和第三方源码导入工具。栈静态分析是近似证据，不能替代真机栈高水位与稳定性验证。
 
-新增组件源码时更新组件 `CMakeLists.txt` 的显式源文件列表。不要在指南中写死易变化的用例数量或固件大小而不同步验证。
+栈预算静态检查（改动任务栈或加入大栈帧后运行）：
+
+```bash
+"$IDF_PYTHON_ENV_PATH/bin/python3" "$IDF_PATH/tools/idf.py" -DEASYTIER_STACK_USAGE=ON build
+python3 tools/check_stack_usage.py
+```
+
+新增组件源码时更新组件 `CMakeLists.txt` 的显式源文件列表。不要在指南中写死易变化的用例数量或固件大小而不同步验证。CI 配置在 `.cnb/`：`v*` 分支 push 触发发版并上传组件注册表，普通 push 同步到 GitHub；不要在本地重跑这些发布流程。
 
 ## 已知平台陷阱
 

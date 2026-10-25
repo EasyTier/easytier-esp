@@ -6,7 +6,8 @@
  *          等待若干轮后回落到 10.126.126.0/24。候选地址在主机段内随机起点线性
  *          探测，跳过已占用地址。本组件只做本机自分配，不提供地址分配服务。
  */
-#pragma once
+#ifndef EASYTIER_ESP_ROUTE_DHCP_HPP_
+#define EASYTIER_ESP_ROUTE_DHCP_HPP_
 
 #include <array>
 #include <cstddef>
@@ -88,3 +89,5 @@ private:
 };
 
 }  // namespace et
+
+#endif

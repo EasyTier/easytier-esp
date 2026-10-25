@@ -5,7 +5,8 @@
  * @details 传输层只使用两端都提供的 BSD 风格接口（socket/select/recv/send/
  * fcntl/getaddrinfo），因此拆帧与部分写逻辑可以在 PC 上用回环 socket 直接测试。
  */
-#pragma once
+#ifndef EASYTIER_ESP_SUPPORT_NET_HPP_
+#define EASYTIER_ESP_SUPPORT_NET_HPP_
 
 #include <cstddef>
 #include <cstdint>
@@ -70,3 +71,5 @@ inline bool interrupted(int err) noexcept { return err == EINTR; }
 
 }  // namespace net
 }  // namespace et
+
+#endif

@@ -7,7 +7,8 @@
  *          解析时按未配置处理。语法错误与资源超限同样以 Error 日志报告，不缓存诊断。
  *          本函数按字段覆盖 @p out，全量替换语义由 @ref et::Inst 构造保证。
  */
-#pragma once
+#ifndef EASYTIER_ESP_CONFIG_TOML_HPP_
+#define EASYTIER_ESP_CONFIG_TOML_HPP_
 
 #include <cstddef>
 #include <string_view>
@@ -39,3 +40,5 @@ esp_err_t parse_toml_into(Settings& out, std::string_view text) noexcept;
 [[nodiscard]] bool toml_scan_limits(std::string_view text) noexcept;
 
 }  // namespace et
+
+#endif

@@ -2,7 +2,8 @@
  * @file time.hpp
  * @brief 单调时间戳（毫秒），目标平台用 esp_timer，宿主测试用 std::chrono。
  */
-#pragma once
+#ifndef EASYTIER_ESP_SUPPORT_TIME_HPP_
+#define EASYTIER_ESP_SUPPORT_TIME_HPP_
 
 #include <cstdint>
 
@@ -56,3 +57,5 @@ namespace et {
 }
 
 }  // namespace et
+
+#endif

@@ -9,7 +9,8 @@
  *   出现"半帧插入另一帧"破坏分帧的情况；
  * - 帧 body 长度必须落在 [16, 2000]，否则视为致命错误（与上游 FramedReader 一致）。
  */
-#pragma once
+#ifndef EASYTIER_ESP_TRANSPORT_TCP_HPP_
+#define EASYTIER_ESP_TRANSPORT_TCP_HPP_
 
 #include <array>
 #include <cstddef>
@@ -118,3 +119,5 @@ private:
 };
 
 }  // namespace et
+
+#endif

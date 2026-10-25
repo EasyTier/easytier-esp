@@ -7,7 +7,8 @@
  * @warning 解码得到的视图（string_view / Bytes）指向调用方的输入缓冲区，
  *          在该视图使用期间，输入缓冲区必须保持有效且内容不变。
  */
-#pragma once
+#ifndef EASYTIER_ESP_PROTOCOL_MESSAGES_HPP_
+#define EASYTIER_ESP_PROTOCOL_MESSAGES_HPP_
 
 #include <cstddef>
 #include <cstdint>
@@ -143,3 +144,5 @@ inline constexpr int32_t kCompressionNone = 1;
 inline constexpr int32_t kCompressionZstd = 2;
 
 }  // namespace et
+
+#endif

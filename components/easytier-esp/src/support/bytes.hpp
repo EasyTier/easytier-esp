@@ -6,7 +6,8 @@
  * 映射到缓冲区上解释：这样既不会出现未对齐访问，也不会因主机字节序不同而
  * 静默破坏协议。
  */
-#pragma once
+#ifndef EASYTIER_ESP_SUPPORT_BYTES_HPP_
+#define EASYTIER_ESP_SUPPORT_BYTES_HPP_
 
 #include <cstddef>
 #include <cstdint>
@@ -66,3 +67,5 @@ constexpr void put_u64_le(uint8_t* p, uint64_t v) noexcept {
 }
 
 }  // namespace et
+
+#endif

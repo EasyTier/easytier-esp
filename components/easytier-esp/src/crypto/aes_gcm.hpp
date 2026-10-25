@@ -9,7 +9,8 @@
  * AAD 为空；nonce 位于 tag 之后是上游的既定布局，不能为了"更安全"把
  * PeerManagerHeader 放进 AAD，否则无法与上游互通。
  */
-#pragma once
+#ifndef EASYTIER_ESP_CRYPTO_AES_GCM_HPP_
+#define EASYTIER_ESP_CRYPTO_AES_GCM_HPP_
 
 #include <array>
 #include <cstddef>
@@ -82,3 +83,5 @@ private:
 };
 
 }  // namespace et
+
+#endif

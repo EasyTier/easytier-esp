@@ -5,7 +5,8 @@
  * @details 默认值与组件约定一致；ESP-IDF 构建时通过 Kconfig 覆盖。宿主构建
  * 没有 sdkconfig，因此这里提供同样的默认值，保证两端行为一致。
  */
-#pragma once
+#ifndef EASYTIER_ESP_SUPPORT_CONFIG_LIMITS_HPP_
+#define EASYTIER_ESP_SUPPORT_CONFIG_LIMITS_HPP_
 
 #if defined(ESP_PLATFORM)
 #include "sdkconfig.h"
@@ -175,3 +176,5 @@ static_assert(kDataTaskPriority >= 1 && kDataTaskPriority <= 24,
               "数据面任务优先级必须落在 [1,24]");
 
 }  // namespace et
+
+#endif

@@ -6,7 +6,8 @@
  *          入站用 `tcpip_input` 交给 TCPIP 线程；`output` 回调只做 `pbuf_ref` 和
  *          零等待入队。该网卡不设为 default，物理网卡继续承载入口连接与普通上网。
  */
-#pragma once
+#ifndef EASYTIER_ESP_NETIF_VIRTUAL_NETIF_HPP_
+#define EASYTIER_ESP_NETIF_VIRTUAL_NETIF_HPP_
 
 #include <atomic>
 #include <cstdint>
@@ -82,3 +83,5 @@ private:
 #endif
 
 }  // namespace et
+
+#endif

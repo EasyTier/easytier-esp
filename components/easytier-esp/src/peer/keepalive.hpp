@@ -6,7 +6,8 @@
  *          的响应超时固定 2 秒；连续 5 次失败关闭连接。只有匹配的 Pong 才清零失败
  *          计数，入站数据流量不能掩盖失败的往返。本类只做判定，不碰 socket/任务。
  */
-#pragma once
+#ifndef EASYTIER_ESP_PEER_KEEPALIVE_HPP_
+#define EASYTIER_ESP_PEER_KEEPALIVE_HPP_
 
 #include <cstdint>
 
@@ -66,3 +67,5 @@ private:
 };
 
 }  // namespace et
+
+#endif

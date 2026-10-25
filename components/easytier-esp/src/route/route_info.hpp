@@ -8,7 +8,8 @@
  * - 声明 `avoid_relay_data` 的节点，其**出边**会被加大代价（上游用 i32::MAX）；
  * - 邻接位图按 `bit = row * N + col`、字节内低位优先（LSB-first）。
  */
-#pragma once
+#ifndef EASYTIER_ESP_ROUTE_ROUTE_INFO_HPP_
+#define EASYTIER_ESP_ROUTE_ROUTE_INFO_HPP_
 
 #include <array>
 #include <cstddef>
@@ -156,3 +157,5 @@ struct ConnBitmap {
 [[nodiscard]] bool expand_conn_bitmap(const ConnBitmap& bitmap, ConnList& out) noexcept;
 
 }  // namespace et
+
+#endif

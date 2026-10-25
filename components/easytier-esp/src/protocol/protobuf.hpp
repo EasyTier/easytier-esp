@@ -14,7 +14,8 @@
  *
  * 不支持：group（wire type 3/4）。
  */
-#pragma once
+#ifndef EASYTIER_ESP_PROTOCOL_PROTOBUF_HPP_
+#define EASYTIER_ESP_PROTOCOL_PROTOBUF_HPP_
 
 #include <cstddef>
 #include <cstdint>
@@ -173,3 +174,5 @@ template <typename Fn>
 }
 
 }  // namespace et
+
+#endif

@@ -1,6 +1,6 @@
 /**
  * @file conn_slot.cpp
- * @brief 连接槽的资源管理、连接状态转换、退避与跨任务接收授权。
+ * @brief ConnSlot 的实现：连接建立、退避重试与接收授权。
  */
 #include "transport/conn_slot.hpp"
 
@@ -9,37 +9,36 @@
 
 namespace et {
 
-// TcpConn 带有大块收发缓冲，构造槽时即分配到堆上，槽存活期间始终有效。
+// TCP 收发缓冲较大，放在堆上由槽独占；把构造放在 .cpp 还能让头文件只前置声明 TcpConn。
 ConnSlot::ConnSlot() noexcept : conn_(std::make_unique<TcpConn>()) {}
 
-// TcpConn 的析构函数负责关闭 socket，无需在这里再显式 close 一遍。
+// 先撤销会话，防止之后到达的帧通过检查；TcpConn 析构时会关闭 socket。
 ConnSlot::~ConnSlot() noexcept { revoke_receive(); }
 
 void ConnSlot::reset_io(size_t peer_index, uint32_t now) noexcept {
-    // 每次启动 I/O 任务都重新安排首次重试，不继承上次运行积累的长退避。
-    (void)close();
+    // 每次启动都从头开始：丢弃旧代际，按初始退避重试，不沿用上次运行的长退避。
+    (void)close();  // 启动阶段不需要断线事件
     generation_.store(0);
     peer_index_ = peer_index;
     reset_retry(now);
 }
 
 bool ConnSlot::begin_connect(std::string_view host, uint16_t port) noexcept {
-    // 多槽调度只能从空闲/失败状态发起，避免覆盖尚未上报断线的已建立会话。
+    // 正在建连或已连接的槽不能重复发起，否则会覆盖还没上报断线的会话。
     if (state_ == ConnectState::InProgress || state_ == ConnectState::Connected) return false;
-    // 新连接不能沿用上一次握手的接收权限，即使配置入口没有变化。
+    // 新连接必须重新握手，不能沿用上一会话的 Data 权限。
     revoke_receive();
     if (!conn_->begin_connect(host, port)) {
         state_ = ConnectState::Failed;
         return false;
     }
-    // 即使底层立即连通，也先等 poll_connect 统一确认，再由 I/O 分配代际和上报事件。
+    // 即使底层立即连上，也统一交给 poll_connect() 确认并发布事件。
     state_ = ConnectState::InProgress;
     return true;
 }
 
 ConnectState ConnSlot::poll_connect() noexcept {
-    // 只推进正在建立的连接，
-    // 保留 Connected 直到 close，以便 I/O 根据旧状态决定是否投递断线事件。
+    // 只推进 InProgress；Connected 要保留到 close()，I/O 靠它判断是否上报断线。
     if (state_ == ConnectState::InProgress) {
         state_ = conn_->poll_connect();
         if (state_ == ConnectState::Connected) reset_backoff();
@@ -49,7 +48,7 @@ ConnectState ConnSlot::poll_connect() noexcept {
 
 ConnectState ConnSlot::close() noexcept {
     const ConnectState previous = state_;
-    // 先撤权，让尚在队列中等待数据面消费的旧 Data 无法继续通过准入检查。
+    // 先撤销授权再关 socket，队列里还没消费的旧 Data 会立刻被拒绝。
     revoke_receive();
     conn_->close();
     state_ = ConnectState::Idle;
@@ -57,12 +56,12 @@ ConnectState ConnSlot::close() noexcept {
 }
 
 bool ConnSlot::retry_ready(uint32_t now) const noexcept {
-    // 用支持回绕的截止时间比较，避免毫秒计数器回到 0 后错误地提前/延后重试。
+    // 有符号差值比较，兼容毫秒计数回绕。
     return deadline_reached(now, retry_at_ms_);
 }
 
 uint32_t ConnSlot::schedule_retry(uint32_t now) noexcept {
-    // 本次按当前 backoff_ms_ 等待；翻倍后的值留给下一次失败使用。
+    // 本次按当前时长等待，翻倍后的值留给下次失败。
     retry_at_ms_ = now + backoff_ms_;
     const uint32_t delay = backoff_ms_;
     const uint32_t doubled = backoff_ms_ * 2;
@@ -73,7 +72,7 @@ uint32_t ConnSlot::schedule_retry(uint32_t now) noexcept {
 void ConnSlot::reset_backoff() noexcept { backoff_ms_ = kInitialBackoffMs; }
 
 void ConnSlot::reset_retry(uint32_t now) noexcept {
-    // 与 reset_backoff 不同，这里同时重排截止时间，适用于应用重新允许连接。
+    // 除了复位时长，还要把截止时间提前，避免被之前安排的长退避拖住。
     reset_backoff();
     retry_at_ms_ = now + kInitialBackoffMs;
 }
@@ -83,23 +82,22 @@ uint32_t ConnSlot::generation() const noexcept {
 }
 
 uint32_t ConnSlot::peer_id(uint32_t expected_generation) const noexcept {
-    // 只读一次快照，不能分别读取代际和身份，否则可能把两次连接的信息拼在一起。
+    // 一次读出完整会话，避免代际和身份来自两次不同的连接。
     const uint64_t session = receive_session_.load();
     return expected_generation != 0 && static_cast<uint32_t>(session >> 32) == expected_generation
                ? static_cast<uint32_t>(session) : 0;
 }
 
 void ConnSlot::prepare_receive(uint32_t new_generation) noexcept {
-    // 在投递 Connected 事件前完整登记新会话，清除旧身份，等待控制面验证握手。
+    // 先登记“等待握手”的会话，再发布代际，保证别人看到新代际时还没被授权。
     receive_session_.store(static_cast<uint64_t>(new_generation) << 32);
     generation_.store(new_generation);
 }
 
 bool ConnSlot::authenticate_receive(uint32_t expected_generation, uint32_t peer_id) noexcept {
     if (expected_generation == 0 || peer_id == 0) return false;
+    // 只有“本代际 + 身份 0”能变成“本代际 + peer_id”；已授权或已换代都会失败。
     uint64_t expected = static_cast<uint64_t>(expected_generation) << 32;
-    // 仅允许“本代际等待握手”变为“本代际已授权”。身份随 CAS 一起提交，
-    // 不留“授权成功后再写身份”的窗口，避免旧握手覆盖 I/O 刚准备好的新会话。
     return receive_session_.compare_exchange_strong(expected, expected | peer_id);
 }
 
@@ -109,13 +107,13 @@ void ConnSlot::revoke_receive(uint32_t expected_generation) noexcept {
         return;
     }
     uint64_t current = receive_session_.load();
-    // CAS 失败会更新 current：仍为本代际则继续撤销，已换代就停止。
-    // 清除整个会话而非只清身份，否则迟到握手会把它误认为仍在等待授权。
+    // 只清指定代际；CAS 失败会刷新 current，换代后立即停止，不会误清新会话。
     while (static_cast<uint32_t>(current >> 32) == expected_generation &&
            !receive_session_.compare_exchange_weak(current, 0)) {}
 }
 
 bool ConnSlot::accepts_data(uint32_t expected_generation) const noexcept {
+    // 有身份就说明该代际已握手通过。
     return peer_id(expected_generation) != 0;
 }
 

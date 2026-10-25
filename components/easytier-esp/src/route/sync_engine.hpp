@@ -5,7 +5,8 @@
  * @note 不依赖 FreeRTOS/lwIP；所有缓冲都是成员数组。非线程安全，只由控制面任务
  *       （或宿主测试）单线程访问。
  */
-#pragma once
+#ifndef EASYTIER_ESP_ROUTE_SYNC_ENGINE_HPP_
+#define EASYTIER_ESP_ROUTE_SYNC_ENGINE_HPP_
 
 #include <array>
 #include <cstddef>
@@ -208,3 +209,5 @@ private:
 };
 
 }  // namespace et
+
+#endif

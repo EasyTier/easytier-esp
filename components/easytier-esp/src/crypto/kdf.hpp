@@ -2,7 +2,8 @@
  * @file kdf.hpp
  * @brief EasyTier 的密钥与网络密钥摘要派生。
  */
-#pragma once
+#ifndef EASYTIER_ESP_CRYPTO_KDF_HPP_
+#define EASYTIER_ESP_CRYPTO_KDF_HPP_
 
 #include <array>
 #include <cstdint>
@@ -28,3 +29,5 @@ namespace et {
                                                     std::string_view secret) noexcept;
 
 }  // namespace et
+
+#endif

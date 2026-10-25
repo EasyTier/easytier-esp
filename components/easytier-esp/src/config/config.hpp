@@ -6,7 +6,8 @@
  *          纯函数式助手：字符串/地址/UUID 解析、主机名规范化、结构校验。TOML 入口与
  *          校验复用同一批函数，避免两套语义漂移。
  */
-#pragma once
+#ifndef EASYTIER_ESP_CONFIG_CONFIG_HPP_
+#define EASYTIER_ESP_CONFIG_CONFIG_HPP_
 
 #include <array>
 #include <cstddef>
@@ -89,3 +90,5 @@ void normalize_hostname(std::string_view in, std::string& out) noexcept;
 [[nodiscard]] esp_err_t validate_config(const Settings& cfg) noexcept;
 
 }  // namespace et
+
+#endif

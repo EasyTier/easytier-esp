@@ -8,7 +8,8 @@
  *  - network_name 与 digest 必须与本端一致；
  *  - 对端 my_peer_id 不得等于本端 peer id（否则是连到自己）。
  */
-#pragma once
+#ifndef EASYTIER_ESP_PEER_HANDSHAKE_HPP_
+#define EASYTIER_ESP_PEER_HANDSHAKE_HPP_
 
 #include <array>
 #include <cstdint>
@@ -81,3 +82,5 @@ enum class HandshakeResult : uint8_t {
 [[nodiscard]] bool pong_matches(Bytes payload, uint32_t expected_seq) noexcept;
 
 }  // namespace et
+
+#endif

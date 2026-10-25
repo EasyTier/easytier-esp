@@ -8,7 +8,8 @@
  * - 只有 `version != 0` 的节点参与建图；出边有向，与上游 `build_graph` 一致；
  * - 快照按值发布给数据面，本类只做纯计算，无副作用、无锁。
  */
-#pragma once
+#ifndef EASYTIER_ESP_ROUTE_TABLE_HPP_
+#define EASYTIER_ESP_ROUTE_TABLE_HPP_
 
 #include <array>
 #include <cstddef>
@@ -75,3 +76,5 @@ private:
 };
 
 }  // namespace et
+
+#endif

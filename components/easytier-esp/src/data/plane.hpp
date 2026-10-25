@@ -9,7 +9,8 @@
  *   密文与 AEAD 尾不变**，只把 `forward_counter` 加一并按下一跳转发；
  * - `forward_counter > 7` 直接丢弃（防环）；广播/组播出站不支持，计数丢弃。
  */
-#pragma once
+#ifndef EASYTIER_ESP_DATA_PLANE_HPP_
+#define EASYTIER_ESP_DATA_PLANE_HPP_
 
 #include <cstddef>
 #include <cstdint>
@@ -59,3 +60,5 @@ struct DataPlan {
 [[nodiscard]] bool ipv4_is_broadcast_or_multicast(uint32_t dst) noexcept;
 
 }  // namespace et
+
+#endif

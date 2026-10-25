@@ -11,7 +11,8 @@
  *   - TCP/UDP 传输头中的长度保存**实际字节数**，包含 16 字节 PM 头、实际
  *     payload 以及 28 字节 AEAD 尾。
  */
-#pragma once
+#ifndef EASYTIER_ESP_PROTOCOL_WIRE_HPP_
+#define EASYTIER_ESP_PROTOCOL_WIRE_HPP_
 
 #include <cstddef>
 #include <cstdint>
@@ -132,3 +133,5 @@ void encode_peer_manager_header(MutBytes out, const PeerManagerHeader& hdr) noex
 void encode_tcp_tunnel_header(MutBytes out, uint32_t body_len) noexcept;
 
 }  // namespace et
+
+#endif

@@ -23,7 +23,8 @@
  * TOML 是唯一配置入口（不提供编程式 setter）；未支持的字段会被忽略，支持字段取值
  * 非法会导致构造失败。多个实例可以并存。
  */
-#pragma once
+#ifndef EASYTIER_ESP_HPP_
+#define EASYTIER_ESP_HPP_
 
 #include <array>
 #include <cstddef>
@@ -259,3 +260,5 @@ private:
 };
 
 }  // namespace et
+
+#endif

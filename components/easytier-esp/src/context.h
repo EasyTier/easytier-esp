@@ -6,7 +6,8 @@
  *          数据、原子量传状态。队列与缓冲都是固定容量；连接代际用于丢弃旧数据。
  *          数据成员全部 private，任务实现是私有成员函数，@ref et::Inst 通过友元读快照。
  */
-#pragma once
+#ifndef EASYTIER_ESP_CONTEXT_H_
+#define EASYTIER_ESP_CONTEXT_H_
 
 #include <array>
 #include <atomic>
@@ -288,3 +289,5 @@ private:
 };
 
 }  // namespace et
+
+#endif

@@ -11,7 +11,8 @@
  *   （0 = DuplicatePeerId，是真实错误）；
  * - repeated 数字字段按上游（prost）默认使用 packed 编码，解码时两种都接受。
  */
-#pragma once
+#ifndef EASYTIER_ESP_ROUTE_SYNC_MESSAGES_HPP_
+#define EASYTIER_ESP_ROUTE_SYNC_MESSAGES_HPP_
 
 #include <array>
 #include <cstddef>
@@ -78,3 +79,5 @@ struct SyncResponseView {
 [[nodiscard]] size_t encode_sync_response(const SyncResponseView& view, MutBytes out) noexcept;
 
 }  // namespace et
+
+#endif

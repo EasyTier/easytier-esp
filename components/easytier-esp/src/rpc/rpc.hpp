@@ -9,7 +9,8 @@
  * - **分发**：目标为本机的请求才进入本地服务；非本机请求由调用方按 overlay 路由
  *   转发，绝不当成本地调用处理。
  */
-#pragma once
+#ifndef EASYTIER_ESP_RPC_RPC_HPP_
+#define EASYTIER_ESP_RPC_RPC_HPP_
 
 #include <array>
 #include <cstddef>
@@ -121,3 +122,5 @@ private:
 };
 
 }  // namespace et
+
+#endif

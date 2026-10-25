@@ -2,7 +2,8 @@
  * @file log.hpp
  * @brief ESP-IDF 日志宏的编译期等级裁剪。
  */
-#pragma once
+#ifndef EASYTIER_ESP_SUPPORT_LOG_HPP_
+#define EASYTIER_ESP_SUPPORT_LOG_HPP_
 
 #if defined(ESP_PLATFORM)
 #include "esp_log.h"
@@ -55,5 +56,7 @@
 #define ET_LOGW(...) ((void)0)
 #define ET_LOGI(...) ((void)0)
 #define ET_LOGD(...) ((void)0)
+
+#endif
 
 #endif

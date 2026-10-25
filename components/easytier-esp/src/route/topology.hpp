@@ -10,7 +10,8 @@
  * - 节点"不可达"超过 90 秒才删除；超过 3660 秒无更新（死亡）无条件删除；
  *   邻接行不做时间清理，只在节点被删除时一并移除。
  */
-#pragma once
+#ifndef EASYTIER_ESP_ROUTE_TOPOLOGY_HPP_
+#define EASYTIER_ESP_ROUTE_TOPOLOGY_HPP_
 
 #include <array>
 #include <cstddef>
@@ -143,3 +144,5 @@ private:
 };
 
 }  // namespace et
+
+#endif

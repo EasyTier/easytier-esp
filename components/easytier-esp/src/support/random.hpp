@@ -2,7 +2,8 @@
  * @file random.hpp
  * @brief 随机数接口：目标平台使用硬件随机源，宿主测试使用标准库随机引擎。
  */
-#pragma once
+#ifndef EASYTIER_ESP_SUPPORT_RANDOM_HPP_
+#define EASYTIER_ESP_SUPPORT_RANDOM_HPP_
 
 #include <cstdint>
 #include <span>
@@ -22,3 +23,5 @@ void fill_random(std::span<uint8_t> out) noexcept;
 [[nodiscard]] uint64_t random_u64() noexcept;
 
 }  // namespace et
+
+#endif

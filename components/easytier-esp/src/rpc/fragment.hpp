@@ -8,7 +8,8 @@
  *          from/to、事务、方向与连接代际；乱序/一致重复允许，冲突重复拒绝；超片数、
  *          字节数或时限立即回收。
  */
-#pragma once
+#ifndef EASYTIER_ESP_RPC_FRAGMENT_HPP_
+#define EASYTIER_ESP_RPC_FRAGMENT_HPP_
 
 #include <array>
 #include <cstddef>
@@ -157,3 +158,5 @@ private:
 };
 
 }  // namespace et
+
+#endif
