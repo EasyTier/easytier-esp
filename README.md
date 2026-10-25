@@ -9,9 +9,9 @@ EasyTier-ESP 是一个使用 C++ 20 编写的 EasyTier 异地组网工具的轻�
 ## 项目特点
 
 - **协议兼容**：TCP 入口连接、PeerManagerHeader 分帧、非安全模式握手（网络名 +
-  SipHash 摘要 + peer id 冲突校验）、Ping/Pong 保活、RPC 分片/乱序重组/事务匹配、
-  OSPF 式路由同步（`RoutePeerInfo` / 邻接表 / 邻接位图）。
-- **加解密**：支持 EasyTier 默认的 AES-128-GCM（PSA Crypto）加密xieyi。
+  SipHash 摘要 + peer id 冲突校验）、**公共共享节点/外部网络中继**、Ping/Pong 保活、
+  RPC 分片/乱序重组/事务匹配、OSPF 式路由同步（`RoutePeerInfo` / 邻接表 / 邻接位图）。
+- **加解密**：支持 EasyTier 默认的 AES-128-GCM（PSA Crypto）加密协议。
 - **数据面**：lwIP raw L3 虚拟网卡、中继转发。
 - **有界资源**：三个任务（`io` / `proto` / `data`）、固定容量队列与缓冲；
   队列深度、任务栈/优先级、并发连接槽数都可在 Kconfig 调整。
