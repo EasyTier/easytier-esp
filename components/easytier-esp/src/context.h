@@ -151,17 +151,20 @@ private:
     bool send_frame(uint32_t generation, Bytes body) noexcept;
     bool send_control_frame(uint32_t generation, PacketType type, uint32_t from_peer,
                             uint32_t to_peer, Bytes plain, bool encrypt) noexcept;
+    /** @brief 发送 RPC；@p encrypt 为 false 时保持明文（共享节点没有本网络密钥）。 */
     bool send_rpc_message(uint32_t generation, const RpcSendTemplate& tmpl,
-                          Bytes content) noexcept;
+                          Bytes content, bool encrypt) noexcept;
     void request_reconnect(uint32_t generation) noexcept;
     uint32_t peer_of_generation(uint32_t generation) const noexcept;
     void revoke_ready(esp_err_t err) noexcept;
-    void handle_rpc_request(uint32_t generation, const RpcPacketRef& packet, Bytes body) noexcept;
+    void handle_rpc_request(uint32_t generation, const RpcPacketRef& packet, Bytes body,
+                            bool encrypt) noexcept;
     bool send_sync_request(uint32_t generation, uint32_t remote_peer_id, bool include_topology,
-                           uint32_t now) noexcept;
+                           bool encrypt, uint32_t now) noexcept;
     esp_err_t handle_ospf_sync(Bytes request, MutBytes response, size_t& response_len) noexcept;
     void sync_netif_address() noexcept;
-    void handle_rpc_response(uint32_t generation, const RpcPacketRef& packet, Bytes body) noexcept;
+    void handle_rpc_response(uint32_t generation, const RpcPacketRef& packet, Bytes body,
+                             bool encrypt) noexcept;
 
     // 数据面任务
     void deliver_to_netif(Bytes ip_packet) noexcept;

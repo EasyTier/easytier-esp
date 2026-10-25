@@ -5,8 +5,12 @@
  * @details 握手（packet_type=2, to_peer_id=0）的 payload 是 protobuf
  * peer_rpc.HandshakeRequest。校验规则与上游一致：
  *  - network_secret_digest 必须为 32 字节；
- *  - network_name 与 digest 必须与本端一致；
- *  - 对端 my_peer_id 不得等于本端 peer id（否则是连到自己）。
+ *  - 网络名与摘要都与本端一致 → 同网络直连对端；
+ *  - 网络名不同 → 共享节点/外部网络中继：上游共享节点回传自己的网络名和
+ *    **32 字节全零摘要**，客户端不据此认证，只把该对端当作中继；
+ *  - 网络名相同但摘要不同 → 仍然拒绝（共享节点会把它当成本网络对端，双方密钥
+ *    不同，接受也无法通信）；
+ *  - 对端 my_peer_id 不得为 0，也不得等于本端 peer id（否则是连到自己）。
  */
 #ifndef EASYTIER_ESP_PEER_HANDSHAKE_HPP_
 #define EASYTIER_ESP_PEER_HANDSHAKE_HPP_
@@ -29,12 +33,12 @@ struct HandshakeExpectation {
 
 /** @brief 握手校验结果。 */
 enum class HandshakeResult : uint8_t {
-    Ok,              ///< 校验通过
+    Ok,              ///< 校验通过：同网络直连对端
+    SharedNode,      ///< 校验通过：共享节点/外部网络中继（网络名不同）
     NotHandshake,    ///< packet_type 不是 HandShake
     Malformed,       ///< protobuf 解析失败
-    SelfPeer,        ///< 对端 peer id 与本端相同
-    NameMismatch,    ///< 网络名不一致
-    DigestMismatch,  ///< digest 长度不足 32 或内容不一致
+    SelfPeer,        ///< 对端 peer id 为 0 或与本端相同
+    DigestMismatch,  ///< digest 长度不足 32，或同名但内容不一致
 };
 
 /**
@@ -43,7 +47,8 @@ enum class HandshakeResult : uint8_t {
  * @param payload PM 头之后的 payload
  * @param expect 本端期望身份
  * @param remote_peer_id 输出对端 peer id
- * @return 校验结果
+ * @return 校验结果；@ref HandshakeResult::SharedNode 表示该对端是外部网络中继，
+ *         发往它的 OSPF RPC 必须保持明文（它没有本网络密钥）。
  */
 [[nodiscard]] HandshakeResult validate_handshake(const PeerManagerHeader& hdr, Bytes payload,
                                                  const HandshakeExpectation& expect,

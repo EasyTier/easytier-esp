@@ -1,6 +1,6 @@
 # EasyTier-ESP
 
-EasyTier-ESP 是一个使用 C++ 20 编写的 EasyTier 异地组网工具的轻量级协议实现。便于把 ESP32 接入既有 EasyTier 虚拟网络。组件目前实现 EasyTier客户端侧的基本协议与数据面。
+EasyTier-ESP 是一个使用 C++ 20 编写的 EasyTier 异地组网工具的轻量级协议实现。便于把 ESP32 接入既有 EasyTier 虚拟网络。组件目前实现 EasyTier客户端侧的基本协议与数据面，支持 TCP 直连入口和公共共享节点（外部网络中继）接入。
 
 - 组件注册表 ID：`myqfeng/easytier-esp`（ESP-IDF Component Registry）
 - 适配 ESP-IDF：>=6.1

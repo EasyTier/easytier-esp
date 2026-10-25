@@ -68,7 +68,8 @@ bool Context::send_frame(uint32_t generation, Bytes body) noexcept {
 
 /**
  * @brief 组一个控制面帧并按需加密后发送。
- * @param encrypt 是否加密（RPC 跟随 `enable_encryption`；握手/Ping/Pong 永不加密）
+ * @param encrypt 是否加密（RPC 仅在启用加密且对端是同网络节点时为 true；
+ *        握手/Ping/Pong 永不加密）
  * @note PM 头的 len 保存**加密前的明文长度**，这是与上游互通的关键。
  */
 bool Context::send_control_frame(uint32_t generation, PacketType type, uint32_t from_peer,
@@ -116,9 +117,11 @@ bool Context::send_control_frame(uint32_t generation, PacketType type, uint32_t 
 /**
  * @brief 按上游预算分片发送一个 RPC 消息（内容为 RpcRequest/RpcResponse 的编码）。
  * @param content 已编码的服务入参/返回值
+ * @param encrypt 是否加密；发往共享节点/外部网络中继时必须为 false（它没有本网络
+ *        密钥，上游对 public server 的 RPC 同样保持明文）
  */
 bool Context::send_rpc_message(uint32_t generation, const RpcSendTemplate& tmpl,
-                               Bytes content) noexcept {
+                               Bytes content, bool encrypt) noexcept {
     RpcPlan plan;
     if (!plan_rpc_slices(tmpl, content.size(), plan)) {
         set_error(ESP_ERR_INVALID_SIZE);
@@ -136,10 +139,9 @@ bool Context::send_rpc_message(uint32_t generation, const RpcSendTemplate& tmpl,
             return false;
         }
         const PacketType type = tmpl.is_request ? PacketType::RpcReq : PacketType::RpcResp;
-        // RPC 与数据共用同一个加密开关：关闭时不加 AEAD 尾也不置加密位。
+        // 只有同网络对端才加密；共享节点无法解密，加密会让路由同步直接失效。
         if (!send_control_frame(generation, type, tmpl.from_peer, tmpl.to_peer,
-                                Bytes(rpc_plain.data(), encoded),
-                                /*encrypt=*/settings.enable_encryption)) {
+                                Bytes(rpc_plain.data(), encoded), encrypt)) {
             return false;
         }
     }
@@ -192,9 +194,12 @@ void Context::revoke_ready(esp_err_t err) noexcept {
     }
 }
 
-/** @brief 处理一个完整的 RPC 请求（目标为本机）。 */
+/**
+ * @brief 处理一个完整的 RPC 请求（目标为本机）。
+ * @param encrypt 响应是否加密；请求方是共享节点/中继时必须为 false。
+ */
 void Context::handle_rpc_request(uint32_t generation, const RpcPacketRef& packet,
-                                Bytes body) noexcept {
+                                Bytes body, bool encrypt) noexcept {
     const uint32_t my_peer_id = this->my_peer_id.load();
     if (packet.to_peer != my_peer_id) {
         // 调用方已按 to_peer 把非本地目标的 RPC 转发走；这里只做防御性丢弃。
@@ -244,7 +249,7 @@ void Context::handle_rpc_request(uint32_t generation, const RpcPacketRef& packet
     tmpl.trace_id = packet.trace_id;
     tmpl.compression.algo = kCompressionNone;
     tmpl.compression.accepted_algo = kCompressionNone;
-    (void)send_rpc_message(generation, tmpl, Bytes(rpc_body.data(), body_len));
+    (void)send_rpc_message(generation, tmpl, Bytes(rpc_body.data(), body_len), encrypt);
 }
 
 /** @brief 检查虚拟网段是否与物理网卡网段重叠（定义见下方）。 */
@@ -253,9 +258,10 @@ static bool physical_subnet_overlaps(uint32_t addr, uint8_t prefix) noexcept;
 /**
  * @brief 发送一次同步请求（请求内容由 SyncEngine 构造）。
  * @param include_topology 是否携带本节点信息与邻接（首包与补发时为 true）
+ * @param encrypt 是否加密；目标是共享节点/外部网络中继时必须为 false。
  */
 bool Context::send_sync_request(uint32_t generation, uint32_t remote_peer_id,
-                               bool include_topology, uint32_t now) noexcept {
+                               bool include_topology, bool encrypt, uint32_t now) noexcept {
     const int64_t transaction_id =
         transactions.allocate(generation, now, kRpcTimeoutMs);
     if (transaction_id == 0) {
@@ -286,7 +292,7 @@ bool Context::send_sync_request(uint32_t generation, uint32_t remote_peer_id,
     tmpl.descriptor.method_index = kOspfSyncMethodIndex;
     tmpl.compression.algo = kCompressionNone;
     tmpl.compression.accepted_algo = kCompressionNone;
-    return send_rpc_message(generation, tmpl, Bytes(sync_rpc_raw.data(), body_len));
+    return send_rpc_message(generation, tmpl, Bytes(sync_rpc_raw.data(), body_len), encrypt);
 }
 
 /**
@@ -374,9 +380,10 @@ static bool physical_subnet_overlaps(uint32_t addr, uint8_t prefix) noexcept {
  * @brief 处理一个完整的 RPC 响应。
  * @details 响应只带 missing 列表：如果对方缺少我们的信息（例如它比我们更早启动），
  *          必须立即补发一次带拓扑的同步请求；压缩信息为 Zstd 时按不支持处理。
+ * @param encrypt 补发的同步请求是否加密（目标为共享节点时必须为 false）。
  */
 void Context::handle_rpc_response(uint32_t generation, const RpcPacketRef& packet,
-                                 Bytes body) noexcept {
+                                 Bytes body, bool encrypt) noexcept {
     if (!transactions.complete(packet.transaction_id, generation)) {
         dropped.fetch_add(1);  // 未知事务或旧代际的迟到响应
         return;
@@ -404,7 +411,8 @@ void Context::handle_rpc_response(uint32_t generation, const RpcPacketRef& packe
     // 对端缺少我们的信息：立即补发（受主循环的最小间隔限制）。
     const uint32_t peer_id = peer_of_generation(generation);
     if (need_resend && peer_id != kInvalidPeerId) {
-        (void)send_sync_request(generation, peer_id, /*include_topology=*/true, now_ms());
+        (void)send_sync_request(generation, peer_id, /*include_topology=*/true, encrypt,
+                                now_ms());
     }
 }
 
@@ -434,6 +442,8 @@ void Context::run_proto_task() noexcept {
     std::array<uint64_t, kMaxConnSlots> session_id{};          ///< 各槽会话 id
     // 控制面持有自己已确认的身份；即使 I/O 已撤权/换代，仍能正确撤销旧路由。
     std::array<uint32_t, kMaxConnSlots> session_peer_id{};     ///< 对端身份，0 表示尚未握手
+    /// 各槽对端是否为共享节点/外部网络中继（其网络名与本端不同，没有本网络密钥）。
+    std::array<bool, kMaxConnSlots> session_shared_node{};
     uint32_t last_sync_ms = 0;  ///< 上次发起路由同步的时间
 
     /** @brief 把各槽已握手的对端集合同步给 SyncEngine（拓扑的邻接行由此得出）。 */
@@ -450,8 +460,8 @@ void Context::run_proto_task() noexcept {
     };
 
     /** @brief 复位某个槽的会话状态（断开/超时/换入口时调用）。 */
-    const auto reset_slot = [this, &session_peer_id, &session_generation, &handshake_sent,
-                             &keepalive, &publish_direct_peers](size_t slot) {
+    const auto reset_slot = [this, &session_peer_id, &session_generation, &session_shared_node,
+                             &handshake_sent, &keepalive, &publish_direct_peers](size_t slot) {
         const uint32_t generation = session_generation[slot];
         if (generation != 0) slots[slot].revoke_receive(generation);
         const uint32_t peer_id = session_peer_id[slot];
@@ -459,6 +469,7 @@ void Context::run_proto_task() noexcept {
             sync.on_peer_down(peer_id);
         }
         session_peer_id[slot] = 0;
+        session_shared_node[slot] = false;
         session_generation[slot] = 0;
         handshake_sent[slot] = false;
         keepalive[slot].reset(now_ms());
@@ -574,8 +585,15 @@ void Context::run_proto_task() noexcept {
                     uint32_t remote = 0;
                     const HandshakeResult result =
                         validate_handshake(hdr, payload, expect, remote);
-                    if (result != HandshakeResult::Ok) {
-                        ET_LOGE(kTag, "handshake rejected: %d", static_cast<int>(result));
+                    if (result != HandshakeResult::Ok &&
+                        result != HandshakeResult::SharedNode) {
+                        if (result == HandshakeResult::DigestMismatch) {
+                            ET_LOGE(kTag,
+                                    "handshake rejected: digest mismatch (wrong network secret, "
+                                    "or shared node uses the same network name)");
+                        } else {
+                            ET_LOGE(kTag, "handshake rejected: %d", static_cast<int>(result));
+                        }
                         set_error(ESP_ERR_INVALID_RESPONSE);
                         request_reconnect(session_generation[slot]);
                         break;
@@ -587,6 +605,8 @@ void Context::run_proto_task() noexcept {
                     }
                     state.store(State::Syncing);
                     session_peer_id[slot] = remote;
+                    // 网络名不同 = 共享节点/外部网络中继：它没有本网络密钥，RPC 必须保持明文。
+                    session_shared_node[slot] = (result == HandshakeResult::SharedNode);
                     keepalive[slot].reset(now);
                     last_sync_ms = 0;  // 下一轮立即发起路由同步
                     session_id[slot] = random_u64();
@@ -601,7 +621,12 @@ void Context::run_proto_task() noexcept {
                     } else if (netif_created) {
                         (void)virtual_netif.set_link(true);
                     }
-                    ET_LOGI(kTag, "handshake ok, peer=%u", static_cast<unsigned>(remote));
+                    if (session_shared_node[slot]) {
+                        ET_LOGI(kTag, "shared node handshake ok, peer=%u (relay)",
+                                static_cast<unsigned>(remote));
+                    } else {
+                        ET_LOGI(kTag, "handshake ok, peer=%u", static_cast<unsigned>(remote));
+                    }
                     emit(EventType::PeerUp, remote);
                     break;
                 }
@@ -642,6 +667,9 @@ void Context::run_proto_task() noexcept {
                     if (result != RpcReassembleResult::Complete) {
                         break;  // 继续等待其余分片
                     }
+                    // 本地发起的 RPC 只在同网络对端上加密；共享节点没有本网络密钥。
+                    const bool rpc_encrypt =
+                        settings.enable_encryption && !session_shared_node[slot];
                     if (packet.is_request) {
                         if (packet.to_peer != my_peer_id.load()) {
                             // 非本地目标的 RPC：按 overlay 路由转发，绝不当成本地调用。
@@ -662,9 +690,9 @@ void Context::run_proto_task() noexcept {
                             }
                             break;
                         }
-                        handle_rpc_request(session_generation[slot], packet, body);
+                        handle_rpc_request(session_generation[slot], packet, body, rpc_encrypt);
                     } else {
-                        handle_rpc_response(session_generation[slot], packet, body);
+                        handle_rpc_response(session_generation[slot], packet, body, rpc_encrypt);
                     }
                     break;
                 }
@@ -699,6 +727,7 @@ void Context::run_proto_task() noexcept {
             set_error(ESP_ERR_TIMEOUT);
             request_reconnect(session_generation[i]);
             handshake_sent[i] = false;
+            session_shared_node[i] = false;
             session_generation[i] = 0;
             state.store(State::Connecting);
         }
@@ -737,8 +766,9 @@ void Context::run_proto_task() noexcept {
                 if (session_peer_id[i] == 0 || session_generation[i] == 0) {
                     continue;
                 }
-                (void)send_sync_request(session_generation[i], session_peer_id[i],
-                                        /*include_topology=*/true, now);
+                (void)send_sync_request(
+                    session_generation[i], session_peer_id[i], /*include_topology=*/true,
+                    settings.enable_encryption && !session_shared_node[i], now);
             }
             last_sync_ms = now;
         }

@@ -30,8 +30,8 @@ inline constexpr uint16_t DisableP2p = 1u << 9;             ///< field 10
 
 }  // namespace peer_feature
 
-/** @brief 本组件宣告的 easytier_version 字符串（协议基线对应的版本号）。 */
-inline constexpr std::string_view kReportedEasyTierVersion = "2.7.0";
+/** @brief 本组件宣告的 easytier_version 字符串。 */
+inline constexpr std::string_view kReportedEasyTierVersion = "0.1.0-esp";
 
 /** @brief 每个节点保留的原始 RoutePeerInfo 字节上限（用于向他人转发未知字段）。 */
 inline constexpr size_t kMaxRawRoutePeerInfoBytes = 512;

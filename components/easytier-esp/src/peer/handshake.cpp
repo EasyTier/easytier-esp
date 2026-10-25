@@ -10,7 +10,12 @@
 
 namespace et {
 
-/** @brief 校验收到的握手报文（网络名、digest、peer id 冲突）。 */
+/**
+ * @brief 校验收到的握手报文（对端身份、digest、网络归属）。
+ * @details 网络名不同的对端是共享节点/外部网络中继：上游在这种场景下回传自己的
+ *          网络名和全零摘要，客户端不据此认证，只把它当中继使用。同名但摘要不同
+ *          仍然拒绝，因为共享节点会把它当作本网络对端，双方加密密钥不一致。
+ */
 HandshakeResult validate_handshake(const PeerManagerHeader& hdr, Bytes payload,
                                    const HandshakeExpectation& expect,
                                    uint32_t& remote_peer_id) noexcept {
@@ -21,16 +26,17 @@ HandshakeResult validate_handshake(const PeerManagerHeader& hdr, Bytes payload,
     if (!decode_handshake_request(payload, view)) {
         return HandshakeResult::Malformed;
     }
-    // 对端 peer id 是权威值。
+    // 对端 peer id 是权威值；0 不是合法身份，不能用来登记会话。
     remote_peer_id = view.my_peer_id;
-    if (remote_peer_id == expect.my_peer_id) {
+    if (remote_peer_id == 0 || remote_peer_id == expect.my_peer_id) {
         return HandshakeResult::SelfPeer;
-    }
-    if (view.network_name != expect.network_name) {
-        return HandshakeResult::NameMismatch;
     }
     if (view.network_secret_digest.size() != expect.digest.size()) {
         return HandshakeResult::DigestMismatch;
+    }
+    // 网络名不同：共享节点/外部网络中继（摘要在上游固定为零，不参与认证）。
+    if (view.network_name != expect.network_name) {
+        return HandshakeResult::SharedNode;
     }
     if (std::memcmp(view.network_secret_digest.data(), expect.digest.data(), expect.digest.size()) !=
         0) {

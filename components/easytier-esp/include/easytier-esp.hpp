@@ -2,7 +2,7 @@
  * @file easytier-esp.hpp
  * @brief 一个 EasyTier 协议的 ESP32 轻量化实现。把 ESP32 接入既有 EasyTier 虚拟网络的客户端组件（ESP-IDF 6.1.x，C++20）。
  * @author Myqfeng
- * @version 0.0.1
+ * @version 0.1.0
  * @date 2025-10-17
  * @copyright Copyright (c) 2026 Myqfeng
  * 
