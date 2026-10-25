@@ -81,15 +81,15 @@ struct SmallMessage {
 /**
  * @brief 组件运行上下文（RAII：持有队列/任务/连接/AEAD/虚拟网卡与密钥）。
  *
- * @details 构造只准备设置与密钥，@ref start 创建资源，@ref stop 等待任务退出。
+ * @details 构造准备设置、密钥与 TCP 缓冲，@ref start 创建其余资源，@ref stop 等待任务退出。
  *          数据成员全部 private；多个实例各持一份，互不共享。
  */
 class Context final {
 public:
     /**
      * @brief 构造并准备上下文：拷贝设置与运行选项、派生密钥/摘要、生成随机 peer id。
-     * @note 不创建任何运行资源（队列/任务在 @ref start 中创建）。设置文本的深拷贝在
-     *       分配失败时按组件约定终止进程（-fno-exceptions），因此没有错误码。
+     * @note 连接槽随上下文构造分配 TCP 缓冲；队列/任务在 @ref start 中创建。
+     *       设置文本及 TCP 缓冲分配失败时终止进程（-fno-exceptions），因此没有错误码。
      */
     Context(const Settings& new_settings, const RuntimeOptions& new_options) noexcept;
 
@@ -102,7 +102,7 @@ public:
     Context& operator=(Context&&) = delete;
 
     /**
-     * @brief 启动：创建队列/AEAD/TcpConn/虚拟网卡与三个任务。
+     * @brief 启动：创建队列/AEAD/虚拟网卡与三个任务，复用构造时已分配的 TCP 缓冲。
      * @return @c ESP_OK；已启动时返回 @c ESP_ERR_INVALID_STATE，资源不足返回
      *         @c ESP_ERR_NO_MEM（失败时已回滚并置 @ref state 为 Error）。
      */
@@ -199,9 +199,9 @@ private:
         options.on_event(event, options.user_data);
     }
 
-    /** @brief 创建队列/AEAD/TcpConn/网卡与任务；失败时由调用方回滚。 */
+    /** @brief 创建队列/AEAD/网卡与任务；失败时由调用方回滚。 */
     esp_err_t create_runtime() noexcept;
-    /** @brief 释放队列/连接/AEAD/网卡（可重复调用；析构与 start 失败回滚共用）。 */
+    /** @brief 释放队列/AEAD/网卡（可重复调用；析构与 start 失败回滚共用）。 */
     void release_runtime() noexcept;
     /**
      * @brief 等待三个任务确认退出。
@@ -279,8 +279,8 @@ private:
     QueueHandle_t q_snapshot = nullptr; ///< 控制面 → 数据面：路由快照（长度 1，按值覆盖）
     SemaphoreHandle_t task_exit = nullptr;  ///< 任务退出确认
 
-    /// 入口连接槽：每个槽一个 TcpConn（内含约 12 KiB 收发缓冲）放在堆上而不是
-    /// 任务栈上；生命周期由 I/O 任务管理，控制面通过 peer_id/generation 共享状态。
+    /// 入口连接槽：构造即在堆上分配 TCP 缓冲，随 Context 析构自动释放。
+    /// socket 会话由 I/O 任务管理；控制面通过连接槽的接口读写共享身份与代际。
     std::array<ConnSlot, kMaxConnSlots> slots{};
 #endif
 

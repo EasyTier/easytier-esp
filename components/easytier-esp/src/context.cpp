@@ -2,7 +2,7 @@
  * @file context.cpp
  * @brief Context 的生命周期与运行资源管理（RAII）。
  *
- * @details 构造只拷贝设置并派生密钥；start() 创建队列/AEAD/TcpConn/网卡/任务；
+ * @details 构造拷贝设置、派生密钥并由连接槽分配 TCP 缓冲；start() 创建队列/AEAD/网卡/任务；
  *          stop() 等待任务退出；析构在运行中会无限等待后释放资源。每个 Context
  *          独占自己的资源，多个 et::Inst 互不共享。
  */
@@ -182,16 +182,6 @@ esp_err_t Context::create_runtime() noexcept {
             return ESP_ERR_NO_MEM;
         }
     }
-    // 每个连接槽一个 TcpConn（各含约 12 KiB 收发缓冲）。必须显式分配：对象较大，
-    // 不能放在任务栈上；缺少分配时 I/O 任务会直接报错退出（连不上任何入口）。
-    for (size_t i = 0; i < kMaxConnSlots; ++i) {
-        if (!slots[i].allocate()) {
-            ET_LOGE(kTag, "TcpConn slot %u allocation failed (needs ~12 KiB each)",
-                    static_cast<unsigned>(i));
-            return ESP_ERR_NO_MEM;
-        }
-    }
-
     // 路由同步引擎：拓扑、最短路、自身信息与 dhcp 自分配都在其中。
     sync.configure(settings, my_peer_id.load());
     my_ipv4.store(settings.has_static_ipv4 ? settings.static_ipv4 : 0);
@@ -294,9 +284,7 @@ void Context::release_runtime() noexcept {
     control_cipher = nullptr;
     delete data_cipher;
     data_cipher = nullptr;
-    for (size_t i = 0; i < kMaxConnSlots; ++i) {
-        slots[i].release();
-    }
+    // I/O 任务退出时已关闭各槽。TCP 缓冲由槽持有，直到 Context 析构时自动释放。
 }
 #else
 /** @brief 宿主构建没有 FreeRTOS 队列与任务；start/stop 返回不支持。 */

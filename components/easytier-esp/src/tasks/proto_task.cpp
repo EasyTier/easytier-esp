@@ -168,9 +168,8 @@ void Context::request_reconnect(uint32_t generation) noexcept {
  */
 uint32_t Context::peer_of_generation(uint32_t generation) const noexcept {
     for (size_t i = 0; i < kMaxConnSlots; ++i) {
-        if (slots[i].generation.load() == generation) {
-            return slots[i].peer_id.load();
-        }
+        const uint32_t peer_id = slots[i].peer_id(generation);
+        if (peer_id != 0) return peer_id;
     }
     return kInvalidPeerId;
 }
@@ -433,16 +432,17 @@ void Context::run_proto_task() noexcept {
     /// 各槽的保活状态机：间隔 1/2/4/8/16/32 秒、响应超时 2 秒、连续 5 次失败关闭。
     std::array<Keepalive, kMaxConnSlots> keepalive{};
     std::array<uint64_t, kMaxConnSlots> session_id{};          ///< 各槽会话 id
-    std::array<bool, kMaxConnSlots> peer_up{};                 ///< 各槽是否已握手成功
+    // 控制面持有自己已确认的身份；即使 I/O 已撤权/换代，仍能正确撤销旧路由。
+    std::array<uint32_t, kMaxConnSlots> session_peer_id{};     ///< 对端身份，0 表示尚未握手
     uint32_t last_sync_ms = 0;  ///< 上次发起路由同步的时间
 
     /** @brief 把各槽已握手的对端集合同步给 SyncEngine（拓扑的邻接行由此得出）。 */
-    const auto publish_direct_peers = [this, &peer_up, &session_generation]() {
+    const auto publish_direct_peers = [this, &session_peer_id]() {
         std::array<uint32_t, kMaxConnSlots> peers{};
         size_t count = 0;
         for (size_t i = 0; i < kMaxConnSlots; ++i) {
-            if (peer_up[i] && session_generation[i] != 0) {
-                peers[count++] = slots[i].peer_id.load();
+            if (session_peer_id[i] != 0) {
+                peers[count++] = session_peer_id[i];
             }
         }
         sync.set_direct_peers(peers.data(), count, now_ms());
@@ -450,20 +450,18 @@ void Context::run_proto_task() noexcept {
     };
 
     /** @brief 复位某个槽的会话状态（断开/超时/换入口时调用）。 */
-    const auto reset_slot = [this, &peer_up, &session_generation, &handshake_sent,
+    const auto reset_slot = [this, &session_peer_id, &session_generation, &handshake_sent,
                              &keepalive, &publish_direct_peers](size_t slot) {
-        if (session_generation[slot] != 0) {
-            slots[slot].revoke_receive(session_generation[slot]);
-        }
-        const uint32_t peer_id = slots[slot].peer_id.load();
-        if (peer_up[slot] && peer_id != 0) {
+        const uint32_t generation = session_generation[slot];
+        if (generation != 0) slots[slot].revoke_receive(generation);
+        const uint32_t peer_id = session_peer_id[slot];
+        if (peer_id != 0) {
             sync.on_peer_down(peer_id);
         }
-        peer_up[slot] = false;
+        session_peer_id[slot] = 0;
         session_generation[slot] = 0;
         handshake_sent[slot] = false;
         keepalive[slot].reset(now_ms());
-        slots[slot].peer_id.store(0);
         publish_direct_peers();
     };
 
@@ -582,14 +580,13 @@ void Context::run_proto_task() noexcept {
                         request_reconnect(session_generation[slot]);
                         break;
                     }
-                    // 原子地授权仍在等待握手的会话；断线或换代后迟到的握手不能放行 Data。
-                    if (!slots[slot].authenticate_receive(session_generation[slot])) {
+                    // 用一次 CAS 核对代际、登记身份并授权；断线/换代后的迟到握手不能放行 Data。
+                    if (!slots[slot].authenticate_receive(session_generation[slot], remote)) {
                         dropped.fetch_add(1);
                         break;
                     }
-                    slots[slot].peer_id.store(remote);
                     state.store(State::Syncing);
-                    peer_up[slot] = true;
+                    session_peer_id[slot] = remote;
                     keepalive[slot].reset(now);
                     last_sync_ms = 0;  // 下一轮立即发起路由同步
                     session_id[slot] = random_u64();
@@ -694,7 +691,7 @@ void Context::run_proto_task() noexcept {
             }
         }
         for (size_t i = 0; i < kMaxConnSlots; ++i) {
-            if (!handshake_sent[i] || peer_up[i] || session_generation[i] == 0 ||
+            if (!handshake_sent[i] || session_peer_id[i] != 0 || session_generation[i] == 0 ||
                 !deadline_reached(now, handshake_deadline[i])) {
                 continue;
             }
@@ -710,14 +707,14 @@ void Context::run_proto_task() noexcept {
         //    连续 5 次失败即关闭该连接（与上游 PeerConnPinger 一致；入站数据流量不算
         //    存活，只有匹配的 Pong 才清零失败计数）。
         for (size_t i = 0; i < kMaxConnSlots; ++i) {
-            if (!peer_up[i] || session_generation[i] == 0 || !handshake_sent[i]) {
+            if (session_peer_id[i] == 0 || session_generation[i] == 0 || !handshake_sent[i]) {
                 continue;
             }
             const KeepaliveAction action = keepalive[i].tick(now);
             if (action == KeepaliveAction::SendPing) {
                 std::array<uint8_t, kPeerManagerHeaderSize + 4> ping{};
                 const size_t len = build_ping_packet(my_peer_id.load(),
-                                                     slots[i].peer_id.load(),
+                                                     session_peer_id[i],
                                                      keepalive[i].last_seq(), ping);
                 if (len != 0) {
                     (void)send_frame(session_generation[i], Bytes(ping.data(), len));
@@ -737,10 +734,10 @@ void Context::run_proto_task() noexcept {
                                  elapsed_ms(now, last_sync_ms) >= kMinReverseSyncMs;
         if (sync_due || reverse_due) {
             for (size_t i = 0; i < kMaxConnSlots; ++i) {
-                if (!peer_up[i] || session_generation[i] == 0) {
+                if (session_peer_id[i] == 0 || session_generation[i] == 0) {
                     continue;
                 }
-                (void)send_sync_request(session_generation[i], slots[i].peer_id.load(),
+                (void)send_sync_request(session_generation[i], session_peer_id[i],
                                         /*include_topology=*/true, now);
             }
             last_sync_ms = now;

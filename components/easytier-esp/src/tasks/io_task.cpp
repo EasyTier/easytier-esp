@@ -3,7 +3,8 @@
  * @brief I/O 任务：所有 socket 的唯一所有者，维护 kMaxConnSlots 个入口连接槽。
  *
  * @details 一次 select 等待全部槽，读取并切帧后按类型投入控制面/数据面队列；连接
- *          断开时上报事件、递增代际并关闭 socket。选路规则见 `frame_sendable`：
+ *          断开时关闭 socket 并上报事件，新 TCP 会话建立时分配代际。选路规则见
+ *          `frame_sendable`：
  *          带 `to_peer` 的帧按 peer 选槽（不校验代际），带代际的控制帧按代际选槽，
  *          其余任选已连接槽。本任务不做解析、加解密或路由判断。
  */
@@ -54,8 +55,8 @@ size_t Context::next_peer_index(size_t index) const noexcept {
 
 /**
  * @brief 投递连接事件给控制面。
- * @note 事件只带槽位与代际：对端 peer id 由控制面自己从 `slots[slot].peer_id`
- *       读取，避免同一条信息有两个真值来源。
+ * @note 事件只带槽位与代际；控制面保留已确认会话的对端身份，用它处理断线收尾。
+ *       不能从当前槽读取旧身份，因为 I/O 可能已撤权或建立了下一代连接。
  */
 void Context::post_event(IoEvent kind, uint8_t slot, uint32_t generation) noexcept {
     SmallMessage msg{};
@@ -110,7 +111,11 @@ void Context::post_frame(uint32_t generation, Bytes body) noexcept {
     }
 }
 
-/** @brief 选择未被其它槽连接/连接中的入口；相同 host:port 只能占用一个槽。 */
+/**
+ * @brief 从 index 起环形寻找空闲入口；成功时将选中的下标写回 index。
+ * @details 正在建连和已经连通的槽都会占用入口，防止重试时两个槽连到同一 host:port。
+ *          空闲/失败的槽不占用入口；一轮找不到空位就返回 false，留到下轮再试。
+ */
 bool Context::select_entry(size_t slot, size_t& index) const noexcept {
     const size_t count = settings.peers.size();
     for (size_t offset = 0; offset < count; ++offset) {
@@ -137,7 +142,7 @@ bool Context::select_entry(size_t slot, size_t& index) const noexcept {
 
 /**
  * @brief 判断一帧能否通过指定的槽发送。
- * @details 代际由全局计数器分配，因此"代际"本身就唯一标识了一个连接槽：控制面自己
+ * @details 各槽从同一个实例计数器分配代际，用它区分当前会话：控制面自己
  *          发的帧（握手/Ping/RPC/同步）都带代际，只会走它所属的槽；数据面与转发的
  *          帧带 to_peer，按目标对端选路且不校验代际（同一网络密钥下，重连后的密文
  *          依然有效，按 peer 选路更稳）。
@@ -156,9 +161,9 @@ static bool frame_sendable(const FrameMessage& tx, uint32_t slot_generation,
 /** @brief 关闭一个槽并上报断开（仅在确实建立过会话时上报）。 */
 void Context::drop_slot(size_t slot) noexcept {
     ConnSlot& conn_slot = slots[slot];
-    const uint32_t generation = conn_slot.generation.load();
+    const uint32_t generation = conn_slot.generation();
+    // close 会把槽置为 Idle，因此必须用它返回的旧状态判断是否建立过 TCP 会话。
     const ConnectState previous = conn_slot.close();
-    conn_slot.peer_id.store(0);
     if (previous == ConnectState::Connected) {
         post_event(IoEvent::Disconnected, static_cast<uint8_t>(slot), generation);
     }
@@ -181,18 +186,18 @@ void Context::pump_tx() noexcept {
         bool queued = false;   ///< 是否已成功放进某个槽
         for (size_t i = 0; i < kMaxConnSlots; ++i) {
             ConnSlot& conn_slot = slots[i];
-            if (conn_slot.state() != ConnectState::Connected || conn_slot.connection() == nullptr ||
-                !conn_slot.connection()->connected()) {
+            if (conn_slot.state() != ConnectState::Connected) {
                 continue;
             }
-            if (!frame_sendable(tx, conn_slot.generation.load(), conn_slot.peer_id.load())) {
+            const uint32_t generation = conn_slot.generation();
+            if (!frame_sendable(tx, generation, conn_slot.peer_id(generation))) {
                 continue;
             }
             matched = true;
-            if (conn_slot.connection()->tx_full()) {
+            if (conn_slot.connection().tx_full()) {
                 continue;  // 背压：留给下一轮，不丢帧
             }
-            if (!conn_slot.connection()->enqueue(Bytes(tx.data.data(), tx.len))) {
+            if (!conn_slot.connection().enqueue(Bytes(tx.data.data(), tx.len))) {
                 continue;  // 槽位竞争失败，同样留给下一轮
             }
             queued = true;
@@ -220,11 +225,6 @@ void Context::pump_tx() noexcept {
 void Context::run_io_task() noexcept {
     const size_t peer_count = settings.peers.size();
     for (size_t i = 0; i < kMaxConnSlots; ++i) {
-        if (slots[i].connection() == nullptr) {
-            ET_LOGE(kTag, "connection slot %u has no TcpConn", static_cast<unsigned>(i));
-            (void)xSemaphoreGive(task_exit);
-            return;
-        }
         slots[i].reset_io(peer_count > 0 ? (i % peer_count) : 0, now_ms());
     }
 
@@ -247,10 +247,10 @@ void Context::run_io_task() noexcept {
             if (cmd.kind != static_cast<uint8_t>(IoCommand::Reconnect)) {
                 continue;
             }
-            // 命令带的是该槽的会话代际（全局唯一），据此定位槽位。
+            // 命令带的是该实例分配的会话代际；核对当前值，避免旧命令关闭新连接。
             size_t slot = kMaxConnSlots;
             for (size_t i = 0; i < kMaxConnSlots; ++i) {
-                if (slots[i].generation.load() == cmd.generation &&
+                if (slots[i].generation() == cmd.generation &&
                     cmd.generation != 0) {
                     slot = i;
                     break;
@@ -286,6 +286,7 @@ void Context::run_io_task() noexcept {
             if (i >= peer_count) break;  // 入口少于槽数时让多出的槽闲置，不能取模重复连接
             if (!conn_slot.retry_ready(now_ms())) continue;
             size_t peer_index = conn_slot.peer_index();
+            // 轮换后的候选入口仍要重新去重；被其它槽占用时继续寻找下一个入口。
             if (!select_entry(i, peer_index)) continue;
             conn_slot.set_peer_index(peer_index);
             const PeerEndpoint& peer = settings.peers[peer_index];
@@ -312,11 +313,12 @@ void Context::run_io_task() noexcept {
             if (st_connect != ConnectState::Connected) {
                 continue;
             }
-            conn_slot.reset_backoff();
-            const uint32_t generation = this->generation.fetch_add(1) + 1;
+            // TCP 连通后才分配代际。先登记“等待握手”的接收会话，再通知控制面；
+            // 此时尚不能接收 Data，控制面验证握手后才会为本代际授权。
+            uint32_t generation = this->generation.fetch_add(1) + 1;
+            // 0 是“没有会话”的保留值，计数器回绕时必须跳过。
+            if (generation == 0) generation = this->generation.fetch_add(1) + 1;
             conn_slot.prepare_receive(generation);
-            conn_slot.generation.store(generation);
-            conn_slot.peer_id.store(0);  // 握手成功后由控制面写入
             state.store(State::Connecting);
             post_event(IoEvent::Connected, static_cast<uint8_t>(i), generation);
         }
@@ -334,15 +336,15 @@ void Context::run_io_task() noexcept {
         std::array<bool, kMaxConnSlots> want_write{};
         for (size_t i = 0; i < kMaxConnSlots; ++i) {
             ConnSlot& conn_slot = slots[i];
-            if (conn_slot.state() != ConnectState::Connected || !conn_slot.connection()->connected()) {
+            if (conn_slot.state() != ConnectState::Connected) {
                 continue;
             }
-            const int fd = conn_slot.connection()->fd();
+            const int fd = conn_slot.connection().fd();
             if (fd == net::kInvalidSocket) {
                 continue;
             }
             FD_SET(fd, &rfds);
-            want_write[i] = conn_slot.connection()->has_pending_tx();
+            want_write[i] = conn_slot.connection().has_pending_tx();
             if (want_write[i]) {
                 FD_SET(fd, &wfds);
                 any_pending = true;
@@ -368,23 +370,23 @@ void Context::run_io_task() noexcept {
         const size_t tx_share = kTxBudgetBytes / kMaxConnSlots;
         for (size_t i = 0; i < kMaxConnSlots; ++i) {
             ConnSlot& conn_slot = slots[i];
-            if (conn_slot.state() != ConnectState::Connected || !conn_slot.connection()->connected()) {
+            if (conn_slot.state() != ConnectState::Connected) {
                 continue;
             }
-            const int fd = conn_slot.connection()->fd();
-            FrameSink sink{this, conn_slot.generation.load()};
+            const int fd = conn_slot.connection().fd();
+            FrameSink sink{this, conn_slot.generation()};
 
             if (ready > 0 && FD_ISSET(fd, &rfds)) {
                 size_t frames = 0;
-                if (!conn_slot.connection()->read_available(&sink, &Context::post_frame_cb, frames)) {
+                if (!conn_slot.connection().read_available(&sink, &Context::post_frame_cb, frames)) {
                     ET_LOGI(kTag, "slot %u peer connection lost", static_cast<unsigned>(i));
                     drop_slot(i);
                     continue;
                 }
             }
             if ((ready > 0 && want_write[i] && FD_ISSET(fd, &wfds)) ||
-                conn_slot.connection()->has_pending_tx()) {
-                if (!conn_slot.connection()->flush(tx_share)) {
+                conn_slot.connection().has_pending_tx()) {
+                if (!conn_slot.connection().flush(tx_share)) {
                     ET_LOGW(kTag, "slot %u send failed, dropping connection",
                             static_cast<unsigned>(i));
                     drop_slot(i);
@@ -393,11 +395,11 @@ void Context::run_io_task() noexcept {
             }
 
             // 接收缓冲里可能还有完整帧（上一轮帧预算用尽），立刻切分。
-            while (conn_slot.connection()->connected() &&
-                   conn_slot.connection()->rx_buffered() >= kTcpTunnelHeaderSize) {
-                FrameSink more_sink{this, conn_slot.generation.load()};
+            while (conn_slot.connection().connected() &&
+                   conn_slot.connection().rx_buffered() >= kTcpTunnelHeaderSize) {
+                FrameSink more_sink{this, conn_slot.generation()};
                 size_t frames = 0;
-                if (!conn_slot.connection()->read_available(&more_sink, &Context::post_frame_cb, frames)) {
+                if (!conn_slot.connection().read_available(&more_sink, &Context::post_frame_cb, frames)) {
                     drop_slot(i);
                     break;
                 }
@@ -412,7 +414,7 @@ void Context::run_io_task() noexcept {
         ConnSlot& conn_slot = slots[i];
         if (conn_slot.close() == ConnectState::Connected) {
             post_event(IoEvent::Disconnected, static_cast<uint8_t>(i),
-                       conn_slot.generation.load());
+                       conn_slot.generation());
         }
     }
     (void)xSemaphoreGive(task_exit);
